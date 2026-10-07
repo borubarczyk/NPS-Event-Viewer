@@ -3356,7 +3356,7 @@ $script:HistStopping = New-Object System.Collections.Generic.List[object]
 $script:HistReaper = New-Object System.Windows.Threading.DispatcherTimer
 $script:HistReaper.Interval = [TimeSpan]::FromSeconds(2)
 $script:HistReaper.Add_Tick({
-        foreach ($ps in @($script:HistStopping)) {
+        foreach ($ps in $script:HistStopping.ToArray()) {
             if ([string]$ps.InvocationStateInfo.State -in 'Stopped', 'Completed', 'Failed', 'NotStarted') {
                 try { $ps.Dispose() } catch { }
                 [void]$script:HistStopping.Remove($ps)
@@ -3424,8 +3424,10 @@ function Start-HistoryLoad($H) {
         $H.Range = $null; $H.Max = 0
         $H.RangeText = 'dane wczytane w zakładkach'
         $H.ReqLoaded = $true
-        if ($nEv) { $H.PS['Ev'] = New-HistoryWorker '' $null @($script:Ctx.Ev.All) $q 'Ev' }
-        if ($nLog) { $H.PS['Log'] = New-HistoryWorker '' $null @($script:Ctx.Log.All) $q 'Log' }
+        # Kopia danych zakładki (ToArray, nie @(...): @() na liście z New-Object wywala binder
+        # Windows PowerShell 5.1 - "Argument types do not match")
+        if ($nEv) { $H.PS['Ev'] = New-HistoryWorker '' $null $script:Ctx.Ev.All.ToArray() $q 'Ev' }
+        if ($nLog) { $H.PS['Log'] = New-HistoryWorker '' $null $script:Ctx.Log.All.ToArray() $q 'Log' }
         $msg = "Szukanie w danych zakładek: $($q.Label)..."
     }
     else {
