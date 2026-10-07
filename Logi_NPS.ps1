@@ -316,6 +316,8 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           <TextBlock Name="lblState" Text="Brak danych" Foreground="{StaticResource Muted}"/>
         </StackPanel>
       </Border>
+      <Button Name="btnHistory" DockPanel.Dock="Right" Content="Historia urządzenia / użytkownika..." Style="{StaticResource Btn}" Margin="0,0,12,0" VerticalAlignment="Center"
+              ToolTip="Oś czasu wszystkich zdarzeń jednego MAC, użytkownika albo komputera (też: dwuklik na wierszu tabeli)"/>
       <StackPanel>
         <TextBlock Text="NPS Event Viewer" FontSize="24" FontWeight="SemiBold"/>
         <TextBlock Text="Zdarzenia autoryzacji Network Policy Server - dziennik Security (6272-6280), pliki logów RADIUS (.log) i zdarzenia systemowe"
@@ -951,7 +953,9 @@ function Get-MaxValue($TextBox, [int]$Default) {
 
 # --- Wczytywanie w tle: dziennik Security --------------------------------------------------
 $script:EvLoader = {
-    param($Computer, $Start, $End, $Max)
+    # $DataValues (opcjonalne, okno historii): tylko zdarzenia, w których któreś pole EventData ma
+    # dokładnie jedną z tych wartości (np. MAC w kilku zapisach) - filtr wykonuje sam dziennik.
+    param($Computer, $Start, $End, $Max, [string[]]$DataValues)
 
     $ids = 6272, 6273, 6274, 6276, 6277, 6278, 6279, 6280
     $p = @{
@@ -960,6 +964,7 @@ $script:EvLoader = {
     }
     if ($Max -gt 0) { $p.MaxEvents = $Max }
     if ($Computer)  { $p.ComputerName = $Computer }
+    if ($DataValues) { $p.FilterHashtable.Data = $DataValues }
 
     try { $events = @(Get-WinEvent @p) }
     catch {
@@ -1028,7 +1033,10 @@ $script:EvLoader = {
 
 # --- Wczytywanie w tle: pliki .log NPS (DTS/XML + IAS) -------------------------------------
 $script:LogLoader = {
-    param([string[]]$Paths, [string]$Mask, [datetime]$Start, [datetime]$End, [int]$Max)
+    # $MatchMode/$MatchValue (opcjonalne, okno historii): 'Mac' + 12 cyfr hex, 'User' / 'Computer'
+    # + nazwa po normalizacji - zostają tylko wpisy tego urządzenia / użytkownika / komputera.
+    param([string[]]$Paths, [string]$Mask, [datetime]$Start, [datetime]$End, [int]$Max,
+          [string]$MatchMode = '', [string]$MatchValue = '', [bool]$MatchPartial = $false)
 
     # --- słowniki ---
     $reasonNames = @{
@@ -1057,6 +1065,7 @@ $script:LogLoader = {
         '4128' = 'Client-Friendly-Name'; '4129' = 'SAM-Account-Name'; '4130' = 'Fully-Qualifed-User-Name'
         '4132' = 'EAP-Friendly-Name'; '4136' = 'Packet-Type'; '4142' = 'Reason-Code'; '4149' = 'NP-Policy-Name'
         '4154' = 'Proxy-Policy-Name'; '4155' = 'Provider-Type'
+        '8' = 'Framed-IP-Address'; '46' = 'Acct-Session-Time'; '49' = 'Acct-Terminate-Cause'
     }
     $mergeKeys = 'User-Name', 'Calling-Station-Id', 'Called-Station-Id', 'NAS-Port', 'NAS-Port-Type', 'NAS-Identifier', 'NAS-IP-Address'
 
@@ -1071,6 +1080,43 @@ $script:LogLoader = {
         if ([datetime]::TryParseExact($s, $fmts, $inv, [Globalization.DateTimeStyles]::None, [ref]$t)) { return $t }
         if ([datetime]::TryParse($s, $inv, [Globalization.DateTimeStyles]::None, [ref]$t)) { return $t }
         return $null
+    }
+
+    # Normalizacja jak Get-NormUser / Get-NormComputer w oknie historii (ten runspace ich nie widzi).
+    function Get-IdNorm([string]$v, [bool]$AsComputer) {
+        $v = $v.Trim().ToLowerInvariant()
+        if ($AsComputer -and $v.StartsWith('host/')) { $v = $v.Substring(5) }
+        $i = $v.LastIndexOf('\'); if ($i -ge 0) { $v = $v.Substring($i + 1) }
+        if ($AsComputer) {
+            $v = $v.TrimEnd('$')
+            $j = $v.IndexOf('.'); if ($j -gt 0) { $v = $v.Substring(0, $j) }
+        }
+        elseif (-not $v.StartsWith('host/') -and $v -match '^([^@]+)@') { $v = $Matches[1] }
+        return $v
+    }
+    function Test-IdMatch($d) {
+        if ($MatchMode -eq 'Mac') {
+            foreach ($k in 'Calling-Station-Id', 'User-Name') {
+                $v = [string]$d[$k]
+                if (-not $v) { continue }
+                if ($k -eq 'User-Name' -and $v -notmatch '^[0-9A-Fa-f:\.\-\s]+$') { continue }
+                $h = ($v -replace '[^0-9A-Fa-f]', '').ToUpper()
+                if ($MatchPartial) { if ($h -and $h.Contains($MatchValue)) { return $true } }
+                elseif ($h -eq $MatchValue) { return $true }
+            }
+            return $false
+        }
+        foreach ($k in 'User-Name', 'SAM-Account-Name', 'Fully-Qualifed-User-Name', 'Fully-Qualified-User-Name') {
+            $v = [string]$d[$k]
+            if (-not $v) { continue }
+            $comp = ($MatchMode -eq 'Computer')
+            if ($comp -and $v -notmatch '^host/|\$$') { continue }
+            $n = Get-IdNorm $v $comp
+            if (-not $n) { continue }
+            if ($MatchPartial) { if ($n.Contains($MatchValue)) { return $true } }
+            elseif ($n -eq $MatchValue) { return $true }
+        }
+        return $false
     }
 
     # --- pliki ---
@@ -1145,6 +1191,7 @@ $script:LogLoader = {
                             }
                         }
                         if ($time -lt $Start) { continue }
+                        if ($MatchMode -and -not (Test-IdMatch $d)) { continue }
                         $queue.Enqueue($d)
                         if ($Max -gt 0 -and $queue.Count -gt $Max) { [void]$queue.Dequeue() }
                     }
@@ -1178,6 +1225,7 @@ $script:LogLoader = {
                     }
                 }
                 if ($time -lt $Start) { continue }
+                if ($MatchMode -and -not (Test-IdMatch $d)) { continue }
                 $queue.Enqueue($d)
                 if ($Max -gt 0 -and $queue.Count -gt $Max) { [void]$queue.Dequeue() }
             }
@@ -1255,6 +1303,8 @@ $script:LogLoader = {
             File           = $fi.Name
             FilePath       = $fi.FullName
             Merged         = [bool]$d['#Merged']
+            FramedIp       = $d['Framed-IP-Address']
+            SessionTime    = $d['Acct-Session-Time']
             MacHex         = ($calling -replace '[^0-9A-Fa-f]', '').ToUpper()
             UserHex        = ($user -replace '[^0-9A-Fa-f]', '').ToUpper()
             Attrs          = $d
@@ -1740,8 +1790,13 @@ function Show-Details($C, $e) {
         $C.Details.Text = $(if ($C.Name -eq 'Ev') { 'Zaznacz zdarzenie na liście.' } else { 'Zaznacz wpis na liście.' })
         return
     }
+    $C.Details.Text = Get-DetailsText $C.Name $e
+}
 
-    if ($C.Name -eq 'Sys') {
+# Tekst szczegółów zdarzenia ($Name: 'Ev' = dziennik Security, 'Log' = plik .log, 'Sys' = systemowe).
+# Używany w zakładkach i w oknie historii.
+function Get-DetailsText([string]$Name, $e) {
+    if ($Name -eq 'Sys') {
         $sb = New-Object System.Text.StringBuilder
         $fields = [ordered]@{
             'Czas'          = $e.TimeStr
@@ -1768,11 +1823,10 @@ function Show-Details($C, $e) {
             [void]$sb.AppendLine('DANE ZDARZENIA:')
             for ($i = 0; $i -lt $e.Props.Count; $i++) { [void]$sb.AppendLine(("  [{0}] {1}" -f $i, $e.Props[$i])) }
         }
-        $C.Details.Text = $sb.ToString().TrimEnd()
-        return
+        return $sb.ToString().TrimEnd()
     }
 
-    if ($C.Name -eq 'Ev') {
+    if ($Name -eq 'Ev') {
         $fields = [ordered]@{
             'Czas'                    = $e.TimeStr
             'Wynik'                   = "$($e.Result) (ID $($e.Id))"
@@ -1838,7 +1892,7 @@ function Show-Details($C, $e) {
         [void]$sb.AppendLine("Obsłużyła zasada: '$($e.Policy)' - jeśli to domyślna zasada odmawiająca, żądanie nie pasowało do zasady docelowej.")
     }
 
-    if ($C.Name -eq 'Log') {
+    if ($Name -eq 'Log') {
         if ($e.Merged) {
             [void]$sb.AppendLine('')
             [void]$sb.AppendLine('UWAGA: User-Name / MAC / port uzupełniono z poprzedniego Access-Request od tego samego klienta RADIUS.')
@@ -1849,7 +1903,7 @@ function Show-Details($C, $e) {
             [void]$sb.AppendLine(("  {0,-30} {1}" -f $k, $e.Attrs[$k]))
         }
     }
-    $C.Details.Text = $sb.ToString().TrimEnd()
+    return $sb.ToString().TrimEnd()
 }
 
 # --- Eksport -------------------------------------------------------------------------------
@@ -1908,6 +1962,16 @@ function New-GridMenu([string]$Name) {
         $cx.Computer.Text = $e.Machine
     }
     [void]$cm.Items.Add((New-Object System.Windows.Controls.Separator))
+    Add-MenuItem $cm $Name 'Historia tego urządzenia (MAC)...' {
+        Open-HistoryFromEvent $script:Ctx[$this.Tag].Grid.SelectedItem 'Mac'
+    }
+    Add-MenuItem $cm $Name 'Historia tego użytkownika...' {
+        Open-HistoryFromEvent $script:Ctx[$this.Tag].Grid.SelectedItem 'User'
+    }
+    Add-MenuItem $cm $Name 'Historia tego komputera...' {
+        Open-HistoryFromEvent $script:Ctx[$this.Tag].Grid.SelectedItem 'Computer'
+    }
+    [void]$cm.Items.Add((New-Object System.Windows.Controls.Separator))
     Add-MenuItem $cm $Name 'Kopiuj szczegóły' {
         $cx = $script:Ctx[$this.Tag]; if ($cx.Grid.SelectedItem -and $cx.Details.Text) { [System.Windows.Clipboard]::SetText($cx.Details.Text) }
     }
@@ -1947,6 +2011,1285 @@ function New-SysMenu {
     return $cm
 }
 
+# --- Historia (oś czasu) urządzenia / użytkownika / komputera ------------------------------
+# Osobne, niemodalne okno: wszystkie zdarzenia jednego MAC, użytkownika albo komputera ułożone
+# w czasie (jak "łańcuch zdarzeń" w antywirusach) - z zaznaczonymi zmianami sieci (LAN <-> Wi-Fi,
+# inny switch / SSID), przerwami i odmowami. Dane: z zakładek (od ręki) albo wczytane w tle dla
+# wybranego zakresu czasu z dziennika Security i/lub plików .log.
+
+$script:HistXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Historia" Height="860" Width="1320" MinHeight="600" MinWidth="980"
+        WindowStartupLocation="CenterOwner" Background="#15161C"
+        FontFamily="Segoe UI" FontSize="13">
+  <Grid Margin="18">
+    <Grid.Resources>
+      <Style x:Key="TimelineItem" TargetType="ListBoxItem">
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+        <Setter Property="Template">
+          <Setter.Value>
+            <ControlTemplate TargetType="ListBoxItem">
+              <Border x:Name="bd" Background="Transparent">
+                <ContentPresenter/>
+              </Border>
+              <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                  <Setter TargetName="bd" Property="Background" Value="#2B2E3B"/>
+                </Trigger>
+                <Trigger Property="IsSelected" Value="True">
+                  <Setter TargetName="bd" Property="Background" Value="#33405E"/>
+                </Trigger>
+              </ControlTemplate.Triggers>
+            </ControlTemplate>
+          </Setter.Value>
+        </Setter>
+      </Style>
+    </Grid.Resources>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <!-- NAGŁÓWEK -->
+    <DockPanel Grid.Row="0" Margin="0,0,0,10">
+      <Border DockPanel.Dock="Right" Background="{StaticResource Card}" CornerRadius="14" Padding="12,6" VerticalAlignment="Center">
+        <StackPanel Orientation="Horizontal">
+          <Ellipse Name="hDot" Width="9" Height="9" Fill="#8A90A2" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock Name="hState" Text="Brak danych" Foreground="{StaticResource Muted}"/>
+        </StackPanel>
+      </Border>
+      <StackPanel Margin="0,0,16,0">
+        <TextBlock Name="hTitle" Text="Historia urządzenia / użytkownika" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+        <TextBlock Name="hSubtitle" Foreground="{StaticResource Muted}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"
+                   Text="Wszystkie zdarzenia jednego MAC, użytkownika albo komputera w kolejności czasu - ze zmianami sieci, przerwami i odmowami"/>
+      </StackPanel>
+    </DockPanel>
+
+    <!-- ZAPYTANIE -->
+    <Border Grid.Row="1" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+      <WrapPanel>
+        <StackPanel Style="{StaticResource FieldBox}" Width="150">
+          <TextBlock Text="SZUKAJ WG" Style="{StaticResource Caption}"/>
+          <ComboBox Name="hMode" SelectedIndex="0">
+            <ComboBoxItem Content="MAC (urządzenie)"/>
+            <ComboBoxItem Content="Użytkownik"/>
+            <ComboBoxItem Content="Komputer"/>
+          </ComboBox>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" Width="240">
+          <TextBlock Text="WARTOŚĆ (MAC w dowolnym formacie)" Style="{StaticResource Caption}"/>
+          <TextBox Name="hValue" FontFamily="Consolas"/>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" Width="230">
+          <TextBlock Text="ZAKRES CZASU" Style="{StaticResource Caption}"/>
+          <ComboBox Name="hRange" SelectedIndex="0">
+            <ComboBoxItem Content="Dane wczytane w zakładkach"/>
+            <ComboBoxItem Content="Ostatnia godzina"/>
+            <ComboBoxItem Content="Ostatnie 24 godziny"/>
+            <ComboBoxItem Content="Ostatnie 7 dni"/>
+            <ComboBoxItem Content="Ostatnie 30 dni"/>
+            <ComboBoxItem Content="Ostatnie 90 dni"/>
+            <ComboBoxItem Content="Własny zakres"/>
+          </ComboBox>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" Width="150">
+          <TextBlock Text="OD (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
+          <TextBox Name="hFrom" FontFamily="Consolas" IsEnabled="False"/>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" Width="150">
+          <TextBlock Text="DO (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
+          <TextBox Name="hTo" FontFamily="Consolas" IsEnabled="False"/>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" Width="110">
+          <TextBlock Text="MAKS. ZDARZEŃ" Style="{StaticResource Caption}"/>
+          <TextBox Name="hMax" Text="20000" FontFamily="Consolas"/>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Margin="4,0,16,10">
+          <TextBlock Text="ŹRÓDŁA (przy wczytywaniu)" Style="{StaticResource Caption}"/>
+          <CheckBox Name="hSrcEv" Content="Dziennik Security" IsChecked="True" Margin="0,0,0,4"/>
+          <CheckBox Name="hSrcLog" Content="Pliki logów .log"/>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Margin="0,0,16,17">
+          <CheckBox Name="hPartial" Content="Dopasowanie częściowe" ToolTip="Fragment MAC / nazwy zamiast dokładnej wartości (wolniejsze - bez filtra po stronie serwera)"/>
+        </StackPanel>
+        <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
+          <Button Name="hLoad" Content="Pokaż historię" Style="{StaticResource BtnPrimary}" Padding="20,8"/>
+        </StackPanel>
+      </WrapPanel>
+    </Border>
+
+    <!-- PODSUMOWANIE + PASEK AKTYWNOŚCI + POWIĄZANE -->
+    <Border Grid.Row="2" Background="{StaticResource Card}" CornerRadius="10" Padding="16,12,16,8" Margin="0,0,0,12">
+      <StackPanel>
+        <WrapPanel Name="hChips"/>
+        <DockPanel Margin="0,2,0,0">
+          <TextBlock Name="hStripInfo" DockPanel.Dock="Right" Foreground="{StaticResource Muted}" FontSize="11" Margin="12,0,0,0" VerticalAlignment="Center"
+                     Text="Kliknij słupek, aby zawęzić widok"/>
+          <TextBlock Text="AKTYWNOŚĆ W CZASIE" Style="{StaticResource Caption}" Margin="0"/>
+        </DockPanel>
+        <Border Name="hStripHost" Background="{StaticResource Field}" CornerRadius="6" Height="48" Margin="0,4,0,2" ClipToBounds="True">
+          <Canvas Name="hStrip" Background="Transparent" Cursor="Hand"/>
+        </Border>
+        <DockPanel Margin="0,0,0,8">
+          <TextBlock Name="hStripTo" DockPanel.Dock="Right" Foreground="{StaticResource Muted}" FontSize="11" FontFamily="Consolas"/>
+          <TextBlock Name="hStripFrom" Foreground="{StaticResource Muted}" FontSize="11" FontFamily="Consolas"/>
+        </DockPanel>
+        <StackPanel Name="hRelated"/>
+      </StackPanel>
+    </Border>
+
+    <!-- OŚ CZASU + SZCZEGÓŁY -->
+    <Grid Grid.Row="3">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="14"/>
+        <ColumnDefinition Width="400"/>
+      </Grid.ColumnDefinitions>
+
+      <Border Grid.Column="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <DockPanel Grid.Row="0" Margin="0,0,0,8">
+            <TextBlock Name="hCounts" DockPanel.Dock="Right" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
+            <TextBlock Text="Oś czasu" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+          </DockPanel>
+          <WrapPanel Grid.Row="1" Margin="0,0,0,8">
+            <ComboBox Name="hResult" Width="130" SelectedIndex="0" Margin="0,0,14,6">
+              <ComboBoxItem Content="Wszystkie"/>
+              <ComboBoxItem Content="Udzielono"/>
+              <ComboBoxItem Content="Odmowa"/>
+              <ComboBoxItem Content="Inne"/>
+            </ComboBox>
+            <CheckBox Name="hGroup" Content="Grupuj powtórzenia" IsChecked="True" Margin="0,0,14,6" VerticalAlignment="Center"/>
+            <CheckBox Name="hMarkers" Content="Zmiany sieci i przerwy" IsChecked="True" Margin="0,0,14,6" VerticalAlignment="Center"/>
+            <CheckBox Name="hAcct" Content="Accounting (sesje, IP)" IsChecked="True" Margin="0,0,14,6" VerticalAlignment="Center" ToolTip="Start / stop sesji z plików .log (adres IP, czas sesji)"/>
+            <CheckBox Name="hReq" Content="Access-Request / Challenge" Margin="0,0,14,6" VerticalAlignment="Center" ToolTip="Pośrednie pakiety z plików .log - zwykle tylko szum"/>
+            <CheckBox Name="hNewest" Content="Najnowsze na górze" Margin="0,0,14,6" VerticalAlignment="Center"/>
+            <StackPanel Orientation="Horizontal" Margin="0,0,0,6" VerticalAlignment="Center">
+              <TextBlock Name="hZoomText" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Text="Widok: cały wczytany zakres"/>
+              <Button Name="hZoomClear" Content="Cały zakres" Style="{StaticResource Btn}" Padding="10,3" Margin="10,0,0,0" Visibility="Collapsed"/>
+            </StackPanel>
+          </WrapPanel>
+          <ListBox Name="hList" Grid.Row="2" Background="{StaticResource Field}" BorderThickness="0"
+                   ItemContainerStyle="{StaticResource TimelineItem}" HorizontalContentAlignment="Stretch"
+                   ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                   VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" VirtualizingPanel.ScrollUnit="Pixel">
+            <ListBox.ItemTemplate>
+              <DataTemplate>
+                <Grid>
+                  <!-- nagłówek dnia -->
+                  <Border Visibility="{Binding DayVis}" Padding="14,12,12,6" BorderBrush="#343847" BorderThickness="0,0,0,1">
+                    <DockPanel>
+                      <TextBlock Text="{Binding Detail}" DockPanel.Dock="Right" Foreground="#8A90A2" FontSize="12" VerticalAlignment="Bottom"/>
+                      <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="14" Foreground="#E8EAF0"/>
+                    </DockPanel>
+                  </Border>
+                  <!-- zmiana sieci / przerwa -->
+                  <Grid Visibility="{Binding MarkerVis}">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="130"/>
+                      <ColumnDefinition Width="26"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Rectangle Grid.Column="1" Width="2" Fill="#343847" HorizontalAlignment="Center"/>
+                    <Border Grid.Column="2" Background="{Binding MediumBg}" CornerRadius="6" Padding="10,4" Margin="2,3,12,3" HorizontalAlignment="Left">
+                      <TextBlock Text="{Binding Title}" Foreground="{Binding TitleColor}" FontStyle="Italic" TextWrapping="Wrap"/>
+                    </Border>
+                  </Grid>
+                  <!-- zdarzenie -->
+                  <Grid Visibility="{Binding EventVis}">
+                    <Grid.ColumnDefinitions>
+                      <ColumnDefinition Width="130"/>
+                      <ColumnDefinition Width="26"/>
+                      <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Margin="8,7,4,7" HorizontalAlignment="Right">
+                      <TextBlock Text="{Binding TimeStr}" FontFamily="Consolas" FontSize="12" Foreground="#C9CDD8" HorizontalAlignment="Right"/>
+                      <TextBlock Text="{Binding SubTime}" FontSize="11" Foreground="#8A90A2" HorizontalAlignment="Right"/>
+                    </StackPanel>
+                    <Rectangle Grid.Column="1" Width="2" Fill="#343847" HorizontalAlignment="Center"/>
+                    <Ellipse Grid.Column="1" Width="12" Height="12" Fill="{Binding Color}" Stroke="#272A36" StrokeThickness="2"
+                             HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,9,0,0"/>
+                    <StackPanel Grid.Column="2" Margin="2,6,12,7">
+                      <WrapPanel>
+                        <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Foreground="{Binding TitleColor}" Margin="0,0,8,0"/>
+                        <Border Visibility="{Binding MediumVis}" Background="{Binding MediumBg}" CornerRadius="9" Padding="8,1" Margin="0,0,8,0" VerticalAlignment="Center">
+                          <TextBlock Text="{Binding Medium}" FontSize="11" FontWeight="SemiBold" Foreground="#E8EAF0"/>
+                        </Border>
+                        <TextBlock Text="{Binding Location}" Foreground="#C9CDD8"/>
+                      </WrapPanel>
+                      <TextBlock Text="{Binding Detail}" Foreground="#8A90A2" FontSize="12" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                    </StackPanel>
+                  </Grid>
+                </Grid>
+              </DataTemplate>
+            </ListBox.ItemTemplate>
+          </ListBox>
+        </Grid>
+      </Border>
+
+      <Border Grid.Column="2" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+          <DockPanel Grid.Row="0" Margin="0,0,0,10">
+            <Button Name="hCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource Btn}" Padding="12,4"/>
+            <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+          </DockPanel>
+          <TextBox Name="hDetails" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
+                   VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"
+                   Text="Wpisz MAC, użytkownika albo komputer i kliknij Pokaż historię."/>
+        </Grid>
+      </Border>
+    </Grid>
+
+    <!-- PASEK STATUSU -->
+    <Grid Grid.Row="4" Margin="0,12,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+        <ColumnDefinition Width="200"/>
+      </Grid.ColumnDefinitions>
+      <TextBlock Name="hStatus" Text="Gotowy" Foreground="{StaticResource Muted}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="12,0,12,0">
+        <Button Name="hCopyAll" Content="Kopiuj oś czasu" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+        <Button Name="hExport" Content="Eksport CSV" Style="{StaticResource Btn}"/>
+      </StackPanel>
+      <ProgressBar Name="hPb" Grid.Column="2" VerticalAlignment="Center" Visibility="Hidden"/>
+    </Grid>
+  </Grid>
+</Window>
+'@
+
+$script:HistWins       = @{}
+$script:HistSeq        = 0
+$script:HistGapMinutes = 60
+$script:PlCulture      = [Globalization.CultureInfo]::GetCultureInfo('pl-PL')
+$script:MediumBg       = @{ 'Wi-Fi' = '#2E4A7D'; 'LAN' = '#24584A'; 'VPN' = '#55437A' }
+
+# --- Normalizacja identyfikatorów ----------------------------------------------------------
+# Użytkownik: bez domeny ("CONTOSO\jan", "jan@contoso.com" -> "jan"), małymi literami.
+# Konta komputerów ("host/pc01.contoso.com") zostają w całości - patrz Get-NormComputer.
+function Get-NormUser([string]$Value) {
+    if (-not $Value -or $Value -eq '-') { return '' }
+    $v = $Value.Trim().ToLowerInvariant()
+    $i = $v.LastIndexOf('\')
+    if ($i -ge 0) { $v = $v.Substring($i + 1) }
+    if (-not $v.StartsWith('host/') -and $v -match '^([^@]+)@') { $v = $Matches[1] }
+    return $v
+}
+
+# Komputer: "host/PC01.contoso.com", "CONTOSO\PC01$", "PC01.contoso.com" -> "pc01".
+function Get-NormComputer([string]$Value) {
+    if (-not $Value -or $Value -eq '-') { return '' }
+    $v = $Value.Trim().ToLowerInvariant()
+    if ($v.StartsWith('host/')) { $v = $v.Substring(5) }
+    $i = $v.LastIndexOf('\')
+    if ($i -ge 0) { $v = $v.Substring($i + 1) }
+    $v = $v.TrimEnd('$')
+    $j = $v.IndexOf('.')
+    if ($j -gt 0) { $v = $v.Substring(0, $j) }
+    return $v
+}
+
+function Test-ComputerAccount([string]$Value) {
+    return [bool]($Value -and ($Value.Trim().StartsWith('host/', [StringComparison]::OrdinalIgnoreCase) -or $Value.Trim().EndsWith('$')))
+}
+
+function Format-Mac([string]$Hex) {
+    if ($Hex.Length -ne 12) { return $Hex }
+    return ($Hex -replace '(..)(?!$)', '$1-')
+}
+
+function Get-EventSrc($e) {
+    if ($e.PSObject.Properties['File']) { return 'Log' }
+    return 'Ev'
+}
+
+function Get-EventUserDisplay($e) {
+    $u = [string]$e.User
+    if (-not $u -or $u -eq '-') { return '' }
+    $d = [string]$e.Domain
+    if ($d -and $d -ne '-' -and $u -notmatch '[\\@]' -and (Get-EventSrc $e) -eq 'Ev') { return "$d\$u" }
+    return $u
+}
+
+# Komputer, którego dotyczy zdarzenie: nazwa maszyny z dziennika Security albo konto komputera
+# (host/..., NAZWA$) w nazwie użytkownika. W plikach .log "Computer-Name" to serwer NPS, nie klient.
+function Get-EventComputer($e) {
+    if ((Get-EventSrc $e) -eq 'Ev' -and $e.Machine -and $e.Machine -ne '-') { return (Get-NormComputer $e.Machine) }
+    foreach ($u in $e.User, $e.UserFQ) { if (Test-ComputerAccount $u) { return (Get-NormComputer $u) } }
+    return ''
+}
+
+# --- Medium i miejsce w sieci --------------------------------------------------------------
+function Get-EventSsid($e) {
+    $cs = [string]$e.CalledStation
+    if ($cs -match '^(?:[0-9A-Fa-f]{2}[-:.]?){5}[0-9A-Fa-f]{2}[:;](.+)$') { return $Matches[1].Trim() }
+    return ''
+}
+
+function Get-EventMedium($e) {
+    $t = [string]$e.NasPortType
+    if ($t -match 'Wireless|802\.11|bezprzewod|^19$') { return 'Wi-Fi' }
+    if ($t -match 'Ethernet|^15$') { return 'LAN' }
+    if ($t -match 'Virtual|wirtualn|^5$') { return 'VPN' }
+    if (Get-EventSsid $e) { return 'Wi-Fi' }
+    return ''
+}
+
+function Get-EventClientName($e) {
+    foreach ($v in $e.Client, $e.ClientIp, $e.NasIp, $e.NasId) { if ($v -and $v -ne '-') { return [string]$v } }
+    return ''
+}
+
+function Format-Span([TimeSpan]$Span) {
+    if ($Span.TotalDays -ge 1) { return '{0} d {1} godz.' -f [int][Math]::Floor($Span.TotalDays), $Span.Hours }
+    if ($Span.TotalHours -ge 1) { return '{0} godz. {1} min' -f [int][Math]::Floor($Span.TotalHours), $Span.Minutes }
+    if ($Span.TotalMinutes -ge 1) { return '{0} min' -f [int][Math]::Floor($Span.TotalMinutes) }
+    return '{0} s' -f [int][Math]::Floor($Span.TotalSeconds)
+}
+
+# --- Zapytanie i dopasowanie ---------------------------------------------------------------
+function New-HistoryQuery([string]$Mode, [string]$Value, [bool]$Partial) {
+    $v = ([string]$Value).Trim()
+    $q = @{ Mode = $Mode; Value = $v; Partial = $Partial; Hex = ''; Norm = ''; Label = ''; Valid = $false }
+    switch ($Mode) {
+        'Mac' {
+            $q.Hex = Get-HexMac $v
+            if ($q.Hex.Length -ne 12) { $q.Partial = $true }
+            $q.Valid = $q.Hex.Length -ge 4
+            $q.Label = "MAC $(Format-Mac $q.Hex)"
+        }
+        'User' {
+            $q.Norm = Get-NormUser $v
+            $q.Valid = [bool]$q.Norm
+            $q.Label = "użytkownik $v"
+        }
+        'Computer' {
+            $q.Norm = Get-NormComputer $v
+            $q.Valid = [bool]$q.Norm
+            $q.Label = "komputer $($q.Norm.ToUpperInvariant())"
+        }
+    }
+    return $q
+}
+
+function Test-HistoryMatch($e, $Q) {
+    switch ($Q.Mode) {
+        'Mac' {
+            $userHex = Get-HexMac ([string]$e.User)
+            if ($Q.Partial) { return ($e.MacHex -and (Test-Contains $e.MacHex $Q.Hex)) -or ($userHex -and (Test-Contains $userHex $Q.Hex)) }
+            return ($e.MacHex -eq $Q.Hex) -or ($userHex -eq $Q.Hex)
+        }
+        'User' {
+            foreach ($u in $e.User, $e.UserFQ, $e.Sam) {
+                $n = Get-NormUser ([string]$u)
+                if (-not $n) { continue }
+                if ($Q.Partial) { if ($n.Contains($Q.Norm)) { return $true } }
+                elseif ($n -eq $Q.Norm) { return $true }
+            }
+            return $false
+        }
+        'Computer' {
+            $cands = New-Object System.Collections.Generic.List[string]
+            if ((Get-EventSrc $e) -eq 'Ev' -and $e.Machine -and $e.Machine -ne '-') { $cands.Add([string]$e.Machine) }
+            foreach ($u in $e.User, $e.UserFQ, $e.Sam) { if (Test-ComputerAccount ([string]$u)) { $cands.Add([string]$u) } }
+            foreach ($c in $cands) {
+                $n = Get-NormComputer $c
+                if (-not $n) { continue }
+                if ($Q.Partial) { if ($n.Contains($Q.Norm)) { return $true } }
+                elseif ($n -eq $Q.Norm) { return $true }
+            }
+            return $false
+        }
+    }
+    return $false
+}
+
+# Wartości do filtra po stronie serwera (Get-WinEvent -FilterHashtable Data = ...): dokładne
+# zapisy MAC w formatach spotykanych u producentów. Dla użytkownika i komputera nie da się
+# przewidzieć zapisu (wielkość liter, domena, host/), więc tam skanujemy zakres i filtrujemy tutaj.
+function Get-HistoryDataValues($Q) {
+    if ($Q.Mode -ne 'Mac' -or $Q.Partial -or $Q.Hex.Length -ne 12) { return $null }
+    $h = $Q.Hex.ToUpperInvariant()
+    $p = @(0..5 | ForEach-Object { $h.Substring($_ * 2, 2) })
+    $forms = @(
+        ($p -join '-'), ($p -join ':'), $h,
+        ('{0}{1}.{2}{3}.{4}{5}' -f $p),
+        ('{0}{1}{2}-{3}{4}{5}' -f $p)
+    )
+    $all = New-Object System.Collections.Generic.List[string]
+    foreach ($f in $forms) { $all.Add($f); $all.Add($f.ToLowerInvariant()) }
+    return [string[]]@($all | Select-Object -Unique)
+}
+
+# --- Elementy osi czasu --------------------------------------------------------------------
+# Zdarzenie z obu źródeł opakowane w jeden typ, z policzonymi raz polami do osi czasu.
+function New-HistoryItem($e, [string]$Src, $Q) {
+    $medium = Get-EventMedium $e
+    $client = Get-EventClientName $e
+    $ssid   = Get-EventSsid $e
+    $port   = [string]$e.NasPort; if ($port -eq '-') { $port = '' }
+    if ($medium -eq 'Wi-Fi') {
+        $locText = (@($(if ($ssid) { "SSID $ssid" }), $client) | Where-Object { $_ }) -join ' · '
+        $locKey  = "Wi-Fi|$client|$ssid"
+    }
+    else {
+        $locText = (@($client, $(if ($port) { "port $port" })) | Where-Object { $_ }) -join ' · '
+        $locKey  = "$medium|$client|$port"
+    }
+    if (-not $client) { $locKey = '' }
+
+    $kind = [string]$e.Kind; if (-not $kind) { $kind = 'Resp' }
+    $userDisp = Get-EventUserDisplay $e
+    $comp = Get-EventComputer $e
+
+    $parts = New-Object System.Collections.Generic.List[string]
+    if ($Q.Mode -ne 'User' -and $userDisp) { $parts.Add("użytkownik $userDisp") }
+    if ($Q.Mode -ne 'Mac' -and $e.CallingStation -and $e.CallingStation -ne '-') { $parts.Add("MAC $($e.CallingStation)") }
+    if ($Q.Mode -ne 'Computer' -and $comp -and -not (Test-ComputerAccount $userDisp)) { $parts.Add("komputer $($comp.ToUpperInvariant())") }
+    if ($e.Policy -and $e.Policy -ne '-') { $parts.Add("zasada: $($e.Policy)") }
+    $auth = (@($e.AuthType, $e.EapType) | Where-Object { $_ -and $_ -ne '-' } | Select-Object -Unique) -join ' / '
+    if ($auth) { $parts.Add($auth) }
+    if ($e.PSObject.Properties['FramedIp'] -and $e.FramedIp) { $parts.Add("IP $($e.FramedIp)") }
+    if ($e.PSObject.Properties['SessionTime'] -and $e.SessionTime -match '^\d+$') { $parts.Add("czas sesji $(Format-Span ([TimeSpan]::FromSeconds([double]$e.SessionTime)))") }
+
+    $title = [string]$e.Result
+    if ($e.Level -ne 'OK' -and $e.ReasonCode -and $e.ReasonCode -ne '0' -and $e.ReasonCode -ne '-') {
+        $r = [string]$e.Reason
+        if ($r.Length -gt 90) { $r = $r.Substring(0, 90) + '...' }
+        $title += $(if ($r -and $r -ne '-') { " - $r (kod $($e.ReasonCode))" } else { " (kod $($e.ReasonCode))" })
+    }
+
+    [pscustomobject]@{
+        Time     = [datetime]$e.Time
+        Src      = $Src
+        Both     = $false
+        Kind     = $kind
+        Level    = [string]$e.Level
+        E        = $e
+        Medium   = $medium
+        LocKey   = $locKey
+        LocText  = $locText
+        Ssid     = $ssid
+        Client   = $client
+        UserN    = Get-NormUser ([string]$e.User)
+        UserDisp = $userDisp
+        Computer = $comp
+        MacHex   = [string]$e.MacHex
+        Title    = $title
+        Parts    = $parts
+        Sig      = '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $e.Level, $e.Result, $e.ReasonCode, $locKey, (Get-NormUser ([string]$e.User)), $e.MacHex, $kind
+    }
+}
+
+# Łączy zdarzenia z dziennika Security i z plików .log. Odpowiedź (Accept/Reject) z logu, która
+# ma swój odpowiednik w dzienniku Security (ten sam wynik i urządzenie, do 2 s różnicy), nie jest
+# pokazywana drugi raz - zdarzenie z Security dostaje tylko oznaczenie "Security + log".
+function Merge-HistoryItems($EvEvents, $LogEvents, $Q) {
+    $items = New-Object System.Collections.Generic.List[object]
+    $index = @{}
+    foreach ($e in $EvEvents) {
+        $it = New-HistoryItem $e 'Ev' $Q
+        $items.Add($it)
+        $k = '{0}|{1}' -f $it.Level, [Math]::Floor($it.Time.Ticks / [TimeSpan]::TicksPerSecond)
+        if (-not $index.ContainsKey($k)) { $index[$k] = New-Object System.Collections.Generic.List[object] }
+        $index[$k].Add($it)
+    }
+    foreach ($e in $LogEvents) {
+        $it = New-HistoryItem $e 'Log' $Q
+        if ($it.Kind -eq 'Resp' -and $index.Count) {
+            $sec = [Math]::Floor($it.Time.Ticks / [TimeSpan]::TicksPerSecond)
+            $dup = $null
+            for ($d = -2; $d -le 2 -and -not $dup; $d++) {
+                $k = '{0}|{1}' -f $it.Level, ($sec + $d)
+                if (-not $index.ContainsKey($k)) { continue }
+                foreach ($c in $index[$k]) {
+                    if ($c.Both) { continue }
+                    $same = $(if ($c.MacHex -and $it.MacHex) { $c.MacHex -eq $it.MacHex } else { $c.UserN -and $c.UserN -eq $it.UserN })
+                    if ($same) { $dup = $c; break }
+                }
+            }
+            if ($dup) { $dup.Both = $true; continue }
+        }
+        $items.Add($it)
+    }
+    $sorted = New-Object System.Collections.Generic.List[object]
+    foreach ($x in ($items | Sort-Object Time)) { $sorted.Add($x) }
+    return , $sorted
+}
+
+function New-HistoryRow([string]$Kind, [datetime]$Time) {
+    [pscustomobject]@{
+        Kind = $Kind; Time = $Time; TimeStr = ''; SubTime = ''; Color = '#8A90A2'; Title = ''; TitleColor = '#E8EAF0'
+        Medium = ''; MediumBg = 'Transparent'; MediumVis = 'Collapsed'; Location = ''; Detail = ''
+        DayVis = $(if ($Kind -eq 'Day') { 'Visible' } else { 'Collapsed' })
+        EventVis = $(if ($Kind -eq 'Event') { 'Visible' } else { 'Collapsed' })
+        MarkerVis = $(if ($Kind -in 'Change', 'Gap', 'Who') { 'Visible' } else { 'Collapsed' })
+        Items = New-Object System.Collections.Generic.List[object]
+        Sig = ''; First = $Time; Last = $Time; Info = ''
+    }
+}
+
+function Format-HistoryLocation($It) {
+    $l = $(if ($It.LocText) { $It.LocText } else { '(nieznane miejsce)' })
+    if ($It.Medium) { return "$($It.Medium) · $l" }
+    return $l
+}
+
+# Buduje wiersze osi czasu z (przefiltrowanych) zdarzeń posortowanych rosnąco po czasie:
+# zdarzenia (z grupowaniem powtórzeń), znaczniki zmian sieci / urządzenia / użytkownika,
+# przerwy dłuższe niż $script:HistGapMinutes i nagłówki dni.
+function Build-HistoryRows($Items, $Q, [hashtable]$Opt) {
+    $seq     = New-Object System.Collections.Generic.List[object]
+    $gap     = [TimeSpan]::FromMinutes($script:HistGapMinutes)
+    $prev    = $null
+    $lastLoc = $null
+    $lastWho = $null
+    $cur     = $null
+    $changes = 0
+
+    foreach ($it in $Items) {
+        if ($prev) {
+            $dt = $it.Time - $prev.Time
+            if ($Opt.Markers -and $dt -gt $gap) {
+                $m = New-HistoryRow 'Gap' $it.Time
+                $m.Title = "brak zdarzeń przez $(Format-Span $dt)"
+                $m.TitleColor = '#8A90A2'
+                $m.Info = "Od $($prev.Time.ToString('yyyy-MM-dd HH:mm:ss')) do $($it.Time.ToString('yyyy-MM-dd HH:mm:ss')) nie było zdarzeń tego $(if ($Q.Mode -eq 'User') { 'użytkownika' } elseif ($Q.Mode -eq 'Computer') { 'komputera' } else { 'urządzenia' }). Urządzenie mogło być wyłączone, odłączone albo po prostu nie uwierzytelniało się ponownie (zależy od ustawień reauth na switchu / AP)."
+                $seq.Add($m)
+                $cur = $null
+            }
+        }
+
+        # Zmiana miejsca w sieci (LAN <-> Wi-Fi, inny switch / port / SSID)
+        if ($it.LocKey) {
+            if ($lastLoc -and $lastLoc.LocKey -ne $it.LocKey) {
+                $changes++
+                if ($Opt.Markers) {
+                    $m = New-HistoryRow 'Change' $it.Time
+                    $kindTxt = $(if ($lastLoc.Medium -ne $it.Medium -and $lastLoc.Medium -and $it.Medium) { "zmiana sieci $($lastLoc.Medium) → $($it.Medium)" } else { 'zmiana miejsca w sieci' })
+                    $m.Title = "${kindTxt}:  $(Format-HistoryLocation $lastLoc)  →  $(Format-HistoryLocation $it)"
+                    $m.TitleColor = '#93C5FD'
+                    $m.MediumBg = '#1F2A40'
+                    $m.Info = "Poprzednie zdarzenie ($($lastLoc.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $lastLoc)`nNastępne ($($it.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $it)"
+                    $seq.Add($m)
+                    $cur = $null
+                }
+            }
+            $lastLoc = $it
+        }
+
+        # Inny użytkownik na tym samym urządzeniu (tryb MAC / komputer) albo inne urządzenie
+        # tego samego użytkownika (tryb użytkownik)
+        $who = $(if ($Q.Mode -eq 'User') { $it.MacHex } else { $it.UserN })
+        if ($who) {
+            if ($Opt.Markers -and $lastWho -and $lastWho.Who -ne $who) {
+                $m = New-HistoryRow 'Who' $it.Time
+                if ($Q.Mode -eq 'User') { $m.Title = "inne urządzenie:  $(Format-Mac $lastWho.Who)  →  $(Format-Mac $who)" }
+                else { $m.Title = "inny użytkownik:  $($lastWho.Disp)  →  $($it.UserDisp)" }
+                $m.TitleColor = '#FCD34D'
+                $m.MediumBg = '#3A3320'
+                $m.Info = $m.Title
+                $seq.Add($m)
+                $cur = $null
+            }
+            $lastWho = @{ Who = $who; Disp = $(if ($it.UserDisp) { $it.UserDisp } else { $who }) }
+        }
+
+        $sameDay = $cur -and $cur.Last.Date -eq $it.Time.Date
+        if ($Opt.Group -and $cur -and $cur.Sig -eq $it.Sig -and $sameDay -and ($it.Time - $cur.Last) -le $gap) {
+            $cur.Items.Add($it)
+            $cur.Last = $it.Time
+            $prev = $it
+            continue
+        }
+
+        $r = New-HistoryRow 'Event' $it.Time
+        $r.Sig = $it.Sig
+        $r.Items.Add($it)
+        $r.Color = $script:Colors[$it.Level]; if (-not $r.Color) { $r.Color = '#8A90A2' }
+        $r.Title = $it.Title
+        $r.TitleColor = $(switch ($it.Level) { 'Error' { '#F87171' } 'Warn' { '#FBBF24' } 'Info' { '#C9CDD8' } default { '#E8EAF0' } })
+        if ($it.Medium) { $r.Medium = $it.Medium; $r.MediumVis = 'Visible'; $r.MediumBg = $script:MediumBg[$it.Medium] }
+        $r.Location = $it.LocText
+        $seq.Add($r)
+        $cur = $r
+        $prev = $it
+    }
+
+    # Uzupełnienie wierszy (czas, licznik powtórzeń, źródło)
+    foreach ($r in $seq) {
+        if ($r.Kind -ne 'Event') { continue }
+        $n = $r.Items.Count
+        $last = $r.Items[$n - 1]
+        $r.TimeStr = $(if ($Opt.Newest) { $r.Last } else { $r.First }).ToString('HH:mm:ss')
+        if ($n -gt 1) {
+            $edge = $(if ($Opt.Newest) { "od $($r.First.ToString('HH:mm:ss'))" } else { "do $($r.Last.ToString('HH:mm:ss'))" })
+            $r.SubTime = "×$n · $edge"
+        }
+        $parts = New-Object System.Collections.Generic.List[string]
+        foreach ($p in $last.Parts) { $parts.Add($p) }
+        $both = @($r.Items | Where-Object { $_.Both }).Count -gt 0
+        $srcs = @($r.Items | ForEach-Object { $_.Src } | Select-Object -Unique)
+        $srcTxt = $(if ($both -or $srcs.Count -gt 1) { 'Security + log' } elseif ($srcs[0] -eq 'Log') { 'log .log' } else { 'Security' })
+        $parts.Add($srcTxt)
+        $r.Detail = $parts -join '  ·  '
+    }
+
+    if ($Opt.Newest) { $seq.Reverse() }
+
+    # Nagłówki dni (z liczbą zdarzeń i odmów danego dnia)
+    $dayStats = @{}
+    foreach ($it in $Items) {
+        $k = $it.Time.Date
+        if (-not $dayStats.ContainsKey($k)) { $dayStats[$k] = @{ N = 0; Err = 0 } }
+        $dayStats[$k].N++
+        if ($it.Level -eq 'Error') { $dayStats[$k].Err++ }
+    }
+    $rows = New-Object System.Collections.Generic.List[object]
+    $day = $null
+    foreach ($r in $seq) {
+        if ($day -ne $r.Time.Date) {
+            $day = $r.Time.Date
+            $h = New-HistoryRow 'Day' $day
+            $h.Title = $day.ToString('dddd, d MMMM yyyy', $script:PlCulture)
+            $st = $dayStats[$day]
+            if ($st) { $h.Detail = "zdarzeń: $($st.N)" + $(if ($st.Err) { "  ·  odmów: $($st.Err)" } else { '' }) }
+            $rows.Add($h)
+        }
+        $rows.Add($r)
+    }
+    return @{ Rows = $rows; Changes = $changes }
+}
+
+# --- Okno historii -------------------------------------------------------------------------
+function Get-HistoryRange($H) {
+    $u = $H.Ui
+    $now = Get-Date
+    switch ($u.hRange.SelectedIndex) {
+        1 { return @($now.AddHours(-1), $now) }
+        2 { return @($now.AddHours(-24), $now) }
+        3 { return @($now.AddDays(-7), $now) }
+        4 { return @($now.AddDays(-30), $now) }
+        5 { return @($now.AddDays(-90), $now) }
+    }
+    $fmt = 'yyyy-MM-dd HH:mm'
+    $inv = [Globalization.CultureInfo]::InvariantCulture
+    $s = [datetime]::ParseExact($u.hFrom.Text.Trim(), $fmt, $inv)
+    $e = [datetime]::ParseExact($u.hTo.Text.Trim(), $fmt, $inv)
+    if ($e -le $s) { throw 'Data "DO" musi być późniejsza niż "OD".' }
+    return @($s, $e)
+}
+
+function Set-HistoryStatus($H, [string]$Text, [string]$Level = 'Info') {
+    $H.Ui.hStatus.Text = $Text
+    $H.Ui.hStatus.Foreground = Get-Brush $script:Colors[$Level]
+}
+
+function Set-HistoryState($H, [string]$Text, [string]$Level) {
+    $H.Ui.hState.Text = $Text
+    $H.Ui.hDot.Fill = Get-Brush $script:Colors[$Level]
+}
+
+function Show-HistoryWindow {
+    param([string]$Mode = 'Mac', [string]$Value = '', [int]$RangeIndex = -1, [string]$From = '', [string]$To = '')
+
+    [xml]$hx = $script:HistXaml
+    # Te same style i kolory co w oknie głównym - kopiujemy jego Window.Resources do tego okna.
+    $res = $xaml.DocumentElement.SelectSingleNode("*[local-name()='Window.Resources']")
+    [void]$hx.DocumentElement.PrependChild($hx.ImportNode($res, $true))
+    $hw = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $hx))
+
+    $id = ++$script:HistSeq
+    $H = @{
+        Id = $id; Win = $hw; Ui = @{}; Q = $null; Suspend = $true
+        Items = New-Object System.Collections.Generic.List[object]
+        Base = New-Object System.Collections.Generic.List[object]
+        ZoomFrom = $null; ZoomTo = $null; Buckets = @(); Busy = $false
+        PS = @{}; Handles = @{}; LoadStarted = $null; Range = $null; Max = 0; Prefilter = $false; RangeText = ''
+    }
+    $hx.SelectNodes('//*[@Name]') | ForEach-Object {
+        $c = $hw.FindName($_.Name)
+        $H.Ui[$_.Name] = $c
+        if ($c -is [System.Windows.FrameworkElement]) { $c.Tag = $id }
+    }
+    $script:HistWins[$id] = $H
+    $u = $H.Ui
+
+    # Okno nie może być większe niż ekran (np. laptop 1366x768)
+    $wa = [System.Windows.SystemParameters]::WorkArea
+    if ($hw.Width -gt $wa.Width - 20) { $hw.Width = [Math]::Max(600, $wa.Width - 20) }
+    if ($hw.Height -gt $wa.Height - 20) { $hw.Height = [Math]::Max(400, $wa.Height - 20) }
+    if ($hw.MinWidth -gt $hw.Width) { $hw.MinWidth = $hw.Width }
+    if ($hw.MinHeight -gt $hw.Height) { $hw.MinHeight = $hw.Height }
+    try { $hw.Owner = $win } catch { }
+
+    $u.hMode.SelectedIndex = [Math]::Max(0, @('Mac', 'User', 'Computer').IndexOf($Mode))
+    $u.hValue.Text = $Value
+    $hasTabs = ($script:Ctx.Ev.All.Count + $script:Ctx.Log.All.Count) -gt 0
+    if ($RangeIndex -lt 0) { $RangeIndex = $(if ($hasTabs) { 0 } else { 3 }) }
+    $u.hRange.SelectedIndex = $RangeIndex
+    $u.hFrom.Text = $From; $u.hTo.Text = $To
+    Update-CustomRange $u.hRange $u.hFrom $u.hTo
+    $u.hSrcLog.IsChecked = ($script:Ctx.Log.All.Count -gt 0)
+    $srv = $(if ($ui.txtServer.Text.Trim()) { $ui.txtServer.Text.Trim() } else { $env:COMPUTERNAME })
+    $u.hSubtitle.Text = "Źródła przy wczytywaniu: dziennik Security na $srv  ·  pliki .log: $($ui.txtLogPath.Text.Trim()) ($($ui.txtLogMask.Text.Trim()))"
+
+    $H.Timer = New-Object System.Windows.Threading.DispatcherTimer
+    $H.Timer.Interval = [TimeSpan]::FromMilliseconds(300)
+    $H.Timer.Tag = $id
+    $H.Timer.Add_Tick({ Complete-HistoryLoad $script:HistWins[[int]$this.Tag] })
+
+    $u.hLoad.Add_Click({ Start-HistoryLoad $script:HistWins[[int]$this.Tag] })
+    $u.hValue.Add_KeyDown({ if ($_.Key -eq 'Return') { Start-HistoryLoad $script:HistWins[[int]$this.Tag] } })
+    $u.hRange.Add_SelectionChanged({ $hh = $script:HistWins[[int]$this.Tag]; Update-CustomRange $hh.Ui.hRange $hh.Ui.hFrom $hh.Ui.hTo })
+    $u.hResult.Add_SelectionChanged({ Update-HistoryView $script:HistWins[[int]$this.Tag] })
+    foreach ($k in 'hGroup', 'hMarkers', 'hAcct', 'hReq', 'hNewest') {
+        $u[$k].Add_Checked({ Update-HistoryView $script:HistWins[[int]$this.Tag] })
+        $u[$k].Add_Unchecked({ Update-HistoryView $script:HistWins[[int]$this.Tag] })
+    }
+    $u.hList.Add_SelectionChanged({ $hh = $script:HistWins[[int]$this.Tag]; Show-HistoryDetails $hh $hh.Ui.hList.SelectedItem })
+    $u.hList.ContextMenu = New-HistoryMenu $id
+    $u.hZoomClear.Add_Click({ Set-HistoryZoom $script:HistWins[[int]$this.Tag] $null $null })
+    $u.hStrip.Add_MouseLeftButtonUp({ Select-HistoryBucket $script:HistWins[[int]$this.Tag] $_.GetPosition($this).X })
+    $u.hStripHost.Add_SizeChanged({ Update-HistoryStrip $script:HistWins[[int]$this.Tag] })
+    $u.hCopy.Add_Click({ $hh = $script:HistWins[[int]$this.Tag]; if ($hh.Ui.hDetails.Text) { [System.Windows.Clipboard]::SetText($hh.Ui.hDetails.Text) } })
+    $u.hCopyAll.Add_Click({ $hh = $script:HistWins[[int]$this.Tag]; $t = Get-HistoryText $hh; if ($t) { [System.Windows.Clipboard]::SetText($t); Set-HistoryStatus $hh 'Skopiowano oś czasu do schowka.' 'OK' } })
+    $u.hExport.Add_Click({ Export-History $script:HistWins[[int]$this.Tag] })
+    $hw.Tag = $id
+    $hw.Add_Closed({
+            $hh = $script:HistWins[[int]$this.Tag]
+            if ($hh) {
+                $hh.Timer.Stop()
+                foreach ($ps in $hh.PS.Values) { try { $ps.Stop(); $ps.Dispose() } catch { } }
+                $script:HistWins.Remove([int]$this.Tag)
+            }
+        })
+
+    $H.Suspend = $false
+    $hw.Show()
+    if ($Value.Trim()) { Start-HistoryLoad $H }
+    else { [void]$u.hValue.Focus() }
+    return $H
+}
+
+function Open-HistoryFromEvent($e, [string]$Mode, [int]$RangeIndex = -1, [string]$From = '', [string]$To = '') {
+    if (-not $e) { return }
+    switch ($Mode) {
+        'Mac' {
+            $hex = $(if (([string]$e.MacHex).Length -eq 12) { $e.MacHex } else { Get-HexMac ([string]$e.User) })
+            if (-not $hex -or $hex.Length -ne 12) { Show-Msg 'To zdarzenie nie zawiera adresu MAC klienta.' 'Information'; return }
+            [void](Show-HistoryWindow -Mode 'Mac' -Value (Format-Mac $hex) -RangeIndex $RangeIndex -From $From -To $To)
+        }
+        'User' {
+            $usr = Get-EventUserDisplay $e
+            if (-not $usr) { Show-Msg 'To zdarzenie nie zawiera nazwy użytkownika.' 'Information'; return }
+            [void](Show-HistoryWindow -Mode 'User' -Value $usr -RangeIndex $RangeIndex -From $From -To $To)
+        }
+        'Computer' {
+            $comp = Get-EventComputer $e
+            if (-not $comp) { Show-Msg 'To zdarzenie nie wskazuje komputera (ani nazwy maszyny, ani konta komputera host/...).' 'Information'; return }
+            [void](Show-HistoryWindow -Mode 'Computer' -Value $comp.ToUpperInvariant() -RangeIndex $RangeIndex -From $From -To $To)
+        }
+    }
+}
+
+# Domyślnie historia urządzenia (MAC), a gdy zdarzenie nie ma MAC - historia użytkownika.
+function Open-HistoryDefault($e) {
+    if (-not $e) { return }
+    $hex = $(if (([string]$e.MacHex).Length -eq 12) { $e.MacHex } else { Get-HexMac ([string]$e.User) })
+    if ($hex -and $hex.Length -eq 12) { Open-HistoryFromEvent $e 'Mac' } else { Open-HistoryFromEvent $e 'User' }
+}
+
+function Start-HistoryLoad($H) {
+    if (-not $H -or $H.Busy) { return }
+    $u = $H.Ui
+    $mode = @('Mac', 'User', 'Computer')[[Math]::Max(0, $u.hMode.SelectedIndex)]
+    $q = New-HistoryQuery $mode $u.hValue.Text ([bool]$u.hPartial.IsChecked)
+    if (-not $q.Valid) {
+        $what = $(switch ($mode) { 'Mac' { 'adres MAC (co najmniej 4 cyfry szesnastkowe)' } 'User' { 'nazwę użytkownika' } default { 'nazwę komputera' } })
+        Set-HistoryStatus $H "Wpisz $what." 'Warn'
+        return
+    }
+    $H.Q = $q
+    $H.ZoomFrom = $null; $H.ZoomTo = $null
+    $u.hTitle.Text = "Historia: $($q.Label)"
+    $H.Win.Title = "Historia - $($q.Label)"
+
+    if ($u.hRange.SelectedIndex -eq 0) {
+        $ev = New-Object System.Collections.Generic.List[object]
+        $lg = New-Object System.Collections.Generic.List[object]
+        foreach ($e in $script:Ctx.Ev.All) { if (Test-HistoryMatch $e $q) { $ev.Add($e) } }
+        foreach ($e in $script:Ctx.Log.All) { if (Test-HistoryMatch $e $q) { $lg.Add($e) } }
+        $H.Items = Merge-HistoryItems $ev $lg $q
+        $H.RangeText = 'dane wczytane w zakładkach'
+        Update-HistorySummary $H
+        Update-HistoryView $H
+        if (($script:Ctx.Ev.All.Count + $script:Ctx.Log.All.Count) -eq 0) {
+            Set-HistoryStatus $H 'W zakładkach nie ma jeszcze danych - wybierz zakres czasu (np. Ostatnie 7 dni) i kliknij Pokaż historię.' 'Warn'
+            Set-HistoryState $H 'Brak danych' 'Warn'
+        }
+        else {
+            $note = $(if ($H.Items.Count -eq 0) { ' Nic nie znaleziono - wybierz dłuższy zakres czasu, żeby przeszukać dziennik / logi.' } else { '' })
+            Set-HistoryStatus $H "Z danych zakładek: dziennik Security $($ev.Count), pliki .log $($lg.Count).$note" $(if ($H.Items.Count) { 'OK' } else { 'Warn' })
+            Set-HistoryState $H "$($H.Items.Count) zdarzeń" $(if ($H.Items.Count) { 'OK' } else { 'Warn' })
+        }
+        return
+    }
+
+    try { $range = Get-HistoryRange $H }
+    catch { Set-HistoryStatus $H "Nieprawidłowy zakres czasu: $($_.Exception.Message)" 'Error'; return }
+    $useEv = [bool]$u.hSrcEv.IsChecked
+    $useLog = [bool]$u.hSrcLog.IsChecked
+    if (-not $useEv -and -not $useLog) { Set-HistoryStatus $H 'Zaznacz co najmniej jedno źródło (dziennik Security albo pliki .log).' 'Warn'; return }
+    $paths = @($ui.txtLogPath.Text -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($useLog -and -not $paths.Count) { Set-HistoryStatus $H 'Podaj lokalizację plików .log w zakładce Pliki logów RADIUS.' 'Warn'; return }
+    $mask = $ui.txtLogMask.Text.Trim(); if (-not $mask) { $mask = 'IN*.log' }
+
+    $H.Max = Get-MaxValue $u.hMax 20000
+    $H.Range = $range
+    $H.RangeText = Format-Range $range
+    $H.PS = @{}; $H.Handles = @{}
+    $H.Prefilter = $false
+    if ($useEv) {
+        $dv = Get-HistoryDataValues $q
+        $H.Prefilter = [bool]$dv
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript($script:EvLoader).AddArgument($ui.txtServer.Text.Trim()).AddArgument($range[0]).AddArgument($range[1]).AddArgument($H.Max).AddArgument($dv)
+        $H.PS['Ev'] = $ps; $H.Handles['Ev'] = $ps.BeginInvoke()
+    }
+    if ($useLog) {
+        $mv = $(if ($q.Mode -eq 'Mac') { $q.Hex } else { $q.Norm })
+        $ps = [powershell]::Create()
+        [void]$ps.AddScript($script:LogLoader).AddArgument([string[]]$paths).AddArgument($mask).AddArgument($range[0]).AddArgument($range[1]).AddArgument($H.Max).AddArgument($q.Mode).AddArgument($mv).AddArgument([bool]$q.Partial)
+        $H.PS['Log'] = $ps; $H.Handles['Log'] = $ps.BeginInvoke()
+    }
+    $H.Busy = $true
+    $H.LoadStarted = Get-Date
+    $u.hLoad.IsEnabled = $false
+    $u.hPb.Visibility = 'Visible'; $u.hPb.IsIndeterminate = $true
+    Set-HistoryStatus $H "Wczytywanie historii: $($q.Label), $($H.RangeText)$(if ($H.Prefilter) { ' (filtr MAC po stronie serwera)' } else { ' - skanowanie zakresu, może potrwać' })..." 'Warn'
+    Set-HistoryState $H 'Wczytywanie...' 'Warn'
+    $H.Timer.Start()
+}
+
+function Complete-HistoryLoad($H) {
+    if (-not $H -or -not $H.Busy) { return }
+    foreach ($h in $H.Handles.Values) { if (-not $h.IsCompleted) { return } }
+    $H.Timer.Stop()
+    $q = $H.Q
+    $ev = New-Object System.Collections.Generic.List[object]
+    $lg = New-Object System.Collections.Generic.List[object]
+    $notes = New-Object System.Collections.Generic.List[string]
+    $errors = New-Object System.Collections.Generic.List[string]
+    $rawEv = 0
+    try {
+        foreach ($src in @($H.PS.Keys)) {
+            $ps = $H.PS[$src]
+            try {
+                $result = $ps.EndInvoke($H.Handles[$src])
+                foreach ($r in $result) {
+                    if ($r.PSObject.Properties['IsSummary']) {
+                        if ($r.PSObject.Properties['Errors'] -and $r.Errors.Count) { foreach ($x in $r.Errors) { $errors.Add("pliki .log: $x") } }
+                        if ($r.PSObject.Properties['Files'] -and $r.Files -eq 0) { $notes.Add('żaden plik .log nie był modyfikowany w tym zakresie') }
+                        continue
+                    }
+                    if ($src -eq 'Ev') { $rawEv++ }
+                    if (Test-HistoryMatch $r $q) { if ($src -eq 'Ev') { $ev.Add($r) } else { $lg.Add($r) } }
+                }
+            }
+            catch {
+                $msg = $_.Exception.Message
+                if ($_.Exception.InnerException) { $msg = $_.Exception.InnerException.Message }
+                $errors.Add($(if ($src -eq 'Ev') { "dziennik Security: $msg" } else { "pliki .log: $msg" }))
+            }
+            finally { try { $ps.Dispose() } catch { } }
+        }
+        if ($H.PS.ContainsKey('Ev') -and $H.Max -gt 0 -and $rawEv -ge $H.Max) {
+            $notes.Add($(if ($H.Prefilter) { "osiągnięto limit $($H.Max) zdarzeń - pokazano najnowsze" } else { "przeszukano tylko $($H.Max) najnowszych zdarzeń z dziennika - zwiększ MAKS. ZDARZEŃ albo zawęź zakres" }))
+        }
+        if ($H.PS.ContainsKey('Ev') -and $H.Prefilter -and $ev.Count -eq 0) {
+            $notes.Add('w dzienniku szukano dokładnego zapisu MAC (AA-BB-CC-DD-EE-FF, aabbccddeeff, aabb.ccdd.eeff...) - jeśli switch zapisuje go inaczej, zaznacz Dopasowanie częściowe')
+        }
+        $H.Items = Merge-HistoryItems $ev $lg $q
+        Update-HistorySummary $H
+        Update-HistoryView $H
+        $secs = [Math]::Round(((Get-Date) - $H.LoadStarted).TotalSeconds, 1)
+        $txt = "Wczytano w $secs s: dziennik Security $($ev.Count)$(if ($H.PS.ContainsKey('Ev')) { '' } else { ' (pominięty)' }), pliki .log $($lg.Count)$(if ($H.PS.ContainsKey('Log')) { '' } else { ' (pominięte)' })."
+        if ($notes.Count) { $txt += ' Uwaga: ' + ($notes -join '; ') + '.' }
+        if ($errors.Count) { $txt += ' BŁĘDY: ' + ($errors -join ' | ') }
+        $lvl = $(if ($errors.Count) { 'Error' } elseif ($notes.Count -or $H.Items.Count -eq 0) { 'Warn' } else { 'OK' })
+        Set-HistoryStatus $H $txt $lvl
+        Set-HistoryState $H $(if ($errors.Count) { 'Błąd wczytywania' } else { "$($H.Items.Count) zdarzeń" }) $lvl
+    }
+    finally {
+        $H.PS = @{}; $H.Handles = @{}
+        $H.Busy = $false
+        $H.Ui.hLoad.IsEnabled = $true
+        $H.Ui.hPb.Visibility = 'Hidden'; $H.Ui.hPb.IsIndeterminate = $false
+    }
+}
+
+# Filtry widoku (wynik, żądania/accounting, zawężenie czasu) i przebudowa osi czasu.
+function Update-HistoryView($H) {
+    if (-not $H -or $H.Suspend) { return }
+    $u = $H.Ui
+    $res = $u.hResult.SelectedIndex
+    $showReq = [bool]$u.hReq.IsChecked
+    $showAcct = [bool]$u.hAcct.IsChecked
+    $base = New-Object System.Collections.Generic.List[object]
+    foreach ($it in $H.Items) {
+        if (-not $showReq -and $it.Kind -eq 'Req') { continue }
+        if (-not $showAcct -and $it.Kind -eq 'Acct') { continue }
+        if ($res -eq 1 -and $it.Level -ne 'OK') { continue }
+        if ($res -eq 2 -and $it.Level -ne 'Error') { continue }
+        if ($res -eq 3 -and ($it.Level -eq 'OK' -or $it.Level -eq 'Error')) { continue }
+        $base.Add($it)
+    }
+    $H.Base = $base
+    $view = $base
+    if ($H.ZoomFrom) {
+        $view = New-Object System.Collections.Generic.List[object]
+        foreach ($it in $base) { if ($it.Time -ge $H.ZoomFrom -and $it.Time -lt $H.ZoomTo) { $view.Add($it) } }
+    }
+    $H.View = $view
+    if (-not $H.Q) { return }
+    $b = Build-HistoryRows $view $H.Q @{ Group = [bool]$u.hGroup.IsChecked; Markers = [bool]$u.hMarkers.IsChecked; Newest = [bool]$u.hNewest.IsChecked }
+    $H.Rows = $b.Rows
+    $u.hList.ItemsSource = $b.Rows
+    $ok = @($view | Where-Object { $_.Level -eq 'OK' }).Count
+    $er = @($view | Where-Object { $_.Level -eq 'Error' }).Count
+    $u.hCounts.Text = "W widoku: $($view.Count) / $($H.Items.Count)    Udzielono: $ok    Odmowa: $er    Zmian miejsca w sieci: $($b.Changes)"
+    if ($H.ZoomFrom) {
+        $u.hZoomText.Text = "Widok zawężony: $($H.ZoomFrom.ToString('yyyy-MM-dd HH:mm')) - $($H.ZoomTo.ToString('yyyy-MM-dd HH:mm'))"
+        $u.hZoomClear.Visibility = 'Visible'
+    }
+    else {
+        $u.hZoomText.Text = "Widok: $($H.RangeText)"
+        $u.hZoomClear.Visibility = 'Collapsed'
+    }
+    $u.hDetails.Text = $(if ($view.Count) { 'Zaznacz wiersz na osi czasu.' } else { 'Brak zdarzeń w widoku.' })
+    Update-HistoryStrip $H
+}
+
+function Set-HistoryZoom($H, $From, $To) {
+    if (-not $H) { return }
+    $H.ZoomFrom = $From
+    $H.ZoomTo = $To
+    Update-HistoryView $H
+}
+
+function New-HistoryChip([string]$Text, [string]$Fg = '#E8EAF0', [string]$Bg = '#272A36', [string]$Tip = '') {
+    $b = New-Object System.Windows.Controls.Border
+    $b.Background = Get-Brush $Bg
+    $b.CornerRadius = New-Object System.Windows.CornerRadius 10
+    $b.Padding = New-Object System.Windows.Thickness 10, 3, 10, 3
+    $b.Margin = New-Object System.Windows.Thickness 0, 0, 8, 8
+    $t = New-Object System.Windows.Controls.TextBlock
+    $t.Text = $Text
+    $t.FontSize = 12
+    $t.Foreground = Get-Brush $Fg
+    $b.Child = $t
+    if ($Tip) { $b.ToolTip = $Tip }
+    return $b
+}
+
+# Kafelki podsumowania i "powiązane": użytkownicy / urządzenia / komputery (klik = ich historia),
+# switche / AP, SSID i zasady sieciowe.
+function Update-HistorySummary($H) {
+    $u = $H.Ui
+    $u.hChips.Children.Clear()
+    $u.hRelated.Children.Clear()
+    $items = $H.Items
+    if (-not $items.Count) {
+        [void]$u.hChips.Children.Add((New-HistoryChip 'Brak zdarzeń dla wybranego zapytania w tym zakresie' '#FBBF24'))
+        return
+    }
+    $first = $items[0].Time; $last = $items[$items.Count - 1].Time
+    $ok = 0; $err = 0
+    $users = @{}; $macs = @{}; $comps = @{}; $clients = @{}; $ssids = @{}; $pols = @{}; $media = @{}
+    $lastErr = $null; $prevKey = $null; $changes = 0
+    foreach ($it in $items) {
+        if ($it.Level -eq 'OK') { $ok++ } elseif ($it.Level -eq 'Error') { $err++; $lastErr = $it }
+        if ($it.UserDisp) { $users[$it.UserDisp] = 1 + [int]$users[$it.UserDisp] }
+        if ($it.MacHex.Length -eq 12) { $macs[$it.MacHex] = 1 + [int]$macs[$it.MacHex] }
+        if ($it.Computer) { $comps[$it.Computer] = 1 + [int]$comps[$it.Computer] }
+        if ($it.Client) { $clients[$it.Client] = 1 + [int]$clients[$it.Client] }
+        if ($it.Ssid) { $ssids[$it.Ssid] = 1 + [int]$ssids[$it.Ssid] }
+        if ($it.E.Policy -and $it.E.Policy -ne '-') { $pols[[string]$it.E.Policy] = 1 + [int]$pols[[string]$it.E.Policy] }
+        if ($it.Medium) { $media[$it.Medium] = 1 + [int]$media[$it.Medium] }
+        if ($it.LocKey) { if ($prevKey -and $prevKey -ne $it.LocKey) { $changes++ }; $prevKey = $it.LocKey }
+    }
+    $c = $u.hChips.Children
+    [void]$c.Add((New-HistoryChip "Pierwsze: $($first.ToString('yyyy-MM-dd HH:mm:ss'))"))
+    [void]$c.Add((New-HistoryChip "Ostatnie: $($last.ToString('yyyy-MM-dd HH:mm:ss'))"))
+    [void]$c.Add((New-HistoryChip "Zdarzeń: $($items.Count)"))
+    [void]$c.Add((New-HistoryChip "Udzielono: $ok" '#4ADE80' '#1F3A2C'))
+    [void]$c.Add((New-HistoryChip "Odmowa: $err" $(if ($err) { '#F87171' } else { '#8A90A2' }) $(if ($err) { '#3F2226' } else { '#272A36' })))
+    if ($lastErr) {
+        $r = [string]$lastErr.E.Reason; if ($r.Length -gt 60) { $r = $r.Substring(0, 60) + '...' }
+        [void]$c.Add((New-HistoryChip "Ostatnia odmowa: $($lastErr.Time.ToString('yyyy-MM-dd HH:mm')) (kod $($lastErr.E.ReasonCode))" '#F87171' '#3F2226' $r))
+    }
+    [void]$c.Add((New-HistoryChip "Zmian miejsca w sieci: $changes" '#93C5FD' '#1F2A40'))
+    if ($media.Count) {
+        $mt = ($media.Keys | Sort-Object { -$media[$_] } | ForEach-Object { "$_ $([Math]::Round(100 * $media[$_] / $items.Count))%" }) -join ' · '
+        [void]$c.Add((New-HistoryChip "Sieć: $mt"))
+    }
+
+    $q = $H.Q
+    $addRow = {
+        param([string]$Caption, [hashtable]$Map, [string]$PivotMode, [string]$Skip)
+        if (-not $Map.Count) { return }
+        $wp = New-Object System.Windows.Controls.WrapPanel
+        $wp.Margin = New-Object System.Windows.Thickness 0, 0, 0, 2
+        $cap = New-Object System.Windows.Controls.TextBlock
+        $cap.Text = $Caption
+        $cap.Width = 150
+        $cap.Style = $H.Win.FindResource('Caption')
+        $cap.Margin = New-Object System.Windows.Thickness 0, 5, 0, 0
+        [void]$wp.Children.Add($cap)
+        $keys = @($Map.Keys | Sort-Object { -$Map[$_] })
+        foreach ($k in ($keys | Select-Object -First 8)) {
+            $label = $(if ($PivotMode -eq 'Mac') { Format-Mac $k } elseif ($PivotMode -eq 'Computer') { $k.ToUpperInvariant() } else { $k })
+            if ($PivotMode -and $k -ne $Skip) {
+                $btn = New-Object System.Windows.Controls.Button
+                $btn.Content = "$label  ($($Map[$k]))"
+                $btn.Style = $H.Win.FindResource('Btn')
+                $btn.Padding = New-Object System.Windows.Thickness 9, 2, 9, 2
+                $btn.Margin = New-Object System.Windows.Thickness 0, 0, 6, 6
+                $btn.FontSize = 12
+                $btn.ToolTip = "Pokaż historię: $label"
+                $btn.Tag = @{ Id = $H.Id; Mode = $PivotMode; Value = $label }
+                $btn.Add_Click({ Open-HistoryPivot $this.Tag })
+                [void]$wp.Children.Add($btn)
+            }
+            else { [void]$wp.Children.Add((New-HistoryChip "$label  ($($Map[$k]))")) }
+        }
+        if ($keys.Count -gt 8) { [void]$wp.Children.Add((New-HistoryChip "+$($keys.Count - 8) więcej" '#8A90A2')) }
+        [void]$H.Ui.hRelated.Children.Add($wp)
+    }
+    $skipUser = $(if ($q.Mode -eq 'User') { ($users.Keys | Where-Object { (Get-NormUser $_) -eq $q.Norm } | Select-Object -First 1) } else { '' })
+    $skipMac = $(if ($q.Mode -eq 'Mac') { $q.Hex } else { '' })
+    $skipComp = $(if ($q.Mode -eq 'Computer') { $q.Norm } else { '' })
+    & $addRow 'UŻYTKOWNICY' $users 'User' $skipUser
+    & $addRow 'URZĄDZENIA (MAC)' $macs 'Mac' $skipMac
+    & $addRow 'KOMPUTERY' $comps 'Computer' $skipComp
+    & $addRow 'SWITCHE / AP' $clients '' ''
+    & $addRow 'SSID' $ssids '' ''
+    & $addRow 'ZASADY SIECIOWE' $pols '' ''
+}
+
+function Open-HistoryPivot($Tag) {
+    $H = $script:HistWins[[int]$Tag.Id]
+    $ri = -1; $from = ''; $to = ''
+    if ($H) { $ri = $H.Ui.hRange.SelectedIndex; $from = $H.Ui.hFrom.Text; $to = $H.Ui.hTo.Text }
+    [void](Show-HistoryWindow -Mode $Tag.Mode -Value $Tag.Value -RangeIndex $ri -From $from -To $to)
+}
+
+# Pasek aktywności: słupki (zielone = udzielono, żółte = inne, czerwone = odmowy) w równych
+# odcinkach czasu całego wczytanego zakresu. Klik w słupek zawęża widok do tego odcinka.
+function Update-HistoryStrip($H) {
+    if (-not $H) { return }
+    $u = $H.Ui
+    $cv = $u.hStrip
+    $cv.Children.Clear()
+    $H.Buckets = @()
+    $items = $H.Base
+    $w = $u.hStripHost.ActualWidth - 8
+    $h = $u.hStripHost.ActualHeight - 8
+    $u.hStripFrom.Text = ''; $u.hStripTo.Text = ''
+    if (-not $items -or $items.Count -eq 0 -or $w -lt 40 -or $h -lt 10) { return }
+
+    $t0 = $items[0].Time; $t1 = $items[$items.Count - 1].Time
+    if ($H.Range -and $H.RangeText -ne 'dane wczytane w zakładkach') { $t0 = $H.Range[0]; $t1 = $H.Range[1] }
+    if (($t1 - $t0).TotalMinutes -lt 1) { $t0 = $t0.AddMinutes(-30); $t1 = $t1.AddMinutes(30) }
+    $n = [int][Math]::Max(10, [Math]::Min(180, [Math]::Floor($w / 6)))
+    $span = ($t1 - $t0).Ticks / $n
+    $ok = New-Object int[] $n; $er = New-Object int[] $n; $ot = New-Object int[] $n
+    foreach ($it in $items) {
+        $i = [int][Math]::Floor(($it.Time - $t0).Ticks / $span)
+        if ($i -lt 0) { $i = 0 } elseif ($i -ge $n) { $i = $n - 1 }
+        if ($it.Level -eq 'OK') { $ok[$i]++ } elseif ($it.Level -eq 'Error') { $er[$i]++ } else { $ot[$i]++ }
+    }
+    $mx = 1
+    for ($i = 0; $i -lt $n; $i++) { $s = $ok[$i] + $er[$i] + $ot[$i]; if ($s -gt $mx) { $mx = $s } }
+    $bw = $w / $n
+    $buckets = New-Object System.Collections.Generic.List[object]
+    for ($i = 0; $i -lt $n; $i++) {
+        $from = $t0.AddTicks([int64]($span * $i)); $to = $t0.AddTicks([int64]($span * ($i + 1)))
+        $buckets.Add(@{ From = $from; To = $to })
+        $tot = $ok[$i] + $er[$i] + $ot[$i]
+        if (-not $tot) { continue }
+        $y = $h + 4
+        foreach ($seg in @(@($ok[$i], '#4ADE80'), @($ot[$i], '#FBBF24'), @($er[$i], '#F87171'))) {
+            if (-not $seg[0]) { continue }
+            $sh = [Math]::Max(2, $h * $seg[0] / $mx)
+            $rc = New-Object System.Windows.Shapes.Rectangle
+            $rc.Width = [Math]::Max(1, $bw - 2)
+            $rc.Height = $sh
+            $rc.Fill = Get-Brush $seg[1]
+            $rc.RadiusX = 1; $rc.RadiusY = 1
+            [System.Windows.Controls.Canvas]::SetLeft($rc, 4 + $bw * $i)
+            [System.Windows.Controls.Canvas]::SetTop($rc, $y - $sh)
+            $rc.ToolTip = "$($from.ToString('yyyy-MM-dd HH:mm')) - $($to.ToString('yyyy-MM-dd HH:mm'))`nudzielono: $($ok[$i])   odmowa: $($er[$i])   inne: $($ot[$i])"
+            [void]$cv.Children.Add($rc)
+            $y -= $sh
+        }
+    }
+    if ($H.ZoomFrom) {
+        $x0 = 4 + $w * (($H.ZoomFrom - $t0).Ticks / ($t1 - $t0).Ticks)
+        $x1 = 4 + $w * (($H.ZoomTo - $t0).Ticks / ($t1 - $t0).Ticks)
+        $x0 = [Math]::Max(0, [Math]::Min($w + 8, $x0)); $x1 = [Math]::Max($x0 + 2, [Math]::Min($w + 8, $x1))
+        $ov = New-Object System.Windows.Shapes.Rectangle
+        $ov.Width = $x1 - $x0; $ov.Height = $h + 8
+        $ov.Fill = Get-Brush '#334F8CFF'
+        $ov.IsHitTestVisible = $false
+        [System.Windows.Controls.Canvas]::SetLeft($ov, $x0)
+        [System.Windows.Controls.Canvas]::SetTop($ov, 0)
+        [void]$cv.Children.Add($ov)
+    }
+    $H.Buckets = $buckets
+    $H.StripLeft = 4; $H.StripBw = $bw
+    $u.hStripFrom.Text = $t0.ToString('yyyy-MM-dd HH:mm')
+    $u.hStripTo.Text = $t1.ToString('yyyy-MM-dd HH:mm')
+}
+
+function Select-HistoryBucket($H, [double]$X) {
+    if (-not $H -or -not $H.Buckets -or $H.Buckets.Count -eq 0) { return }
+    $i = [int][Math]::Floor(($X - $H.StripLeft) / $H.StripBw)
+    if ($i -lt 0 -or $i -ge $H.Buckets.Count) { return }
+    $b = $H.Buckets[$i]
+    Set-HistoryZoom $H $b.From $b.To
+}
+
+function Show-HistoryDetails($H, $row) {
+    if (-not $H) { return }
+    $u = $H.Ui
+    if (-not $row) { return }
+    switch ($row.Kind) {
+        'Day' { $u.hDetails.Text = "$($row.Title)`n$($row.Detail)"; return }
+        { $_ -in 'Gap', 'Change', 'Who' } { $u.hDetails.Text = "$($row.Title)`n`n$($row.Info)"; return }
+    }
+    $its = $row.Items
+    $last = $its[$its.Count - 1]
+    $sb = New-Object System.Text.StringBuilder
+    if ($its.Count -gt 1) {
+        [void]$sb.AppendLine("GRUPA: $($its.Count) takich samych zdarzeń")
+        [void]$sb.AppendLine("od $($row.First.ToString('yyyy-MM-dd HH:mm:ss')) do $($row.Last.ToString('yyyy-MM-dd HH:mm:ss'))")
+        [void]$sb.AppendLine('Czasy: ' + ((@($its | Select-Object -First 40 | ForEach-Object { $_.Time.ToString('HH:mm:ss') })) -join ', ') + $(if ($its.Count -gt 40) { ', ...' } else { '' }))
+        [void]$sb.AppendLine('')
+        [void]$sb.AppendLine('OSTATNIE ZDARZENIE Z GRUPY:')
+    }
+    if ($last.Both) { [void]$sb.AppendLine('(to samo zdarzenie jest też w pliku .log)') }
+    [void]$sb.AppendLine((Get-DetailsText $last.Src $last.E))
+    $u.hDetails.Text = $sb.ToString().TrimEnd()
+}
+
+function New-HistoryMenu([int]$Id) {
+    $cm = New-Object System.Windows.Controls.ContextMenu
+    $add = {
+        param([string]$Header, [scriptblock]$Action)
+        $mi = New-Object System.Windows.Controls.MenuItem
+        $mi.Header = $Header
+        $mi.Tag = $Id
+        $mi.Add_Click($Action)
+        [void]$cm.Items.Add($mi)
+    }
+    & $add 'Pokaż tylko ten dzień' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem; if (-not $r) { return }
+        Set-HistoryZoom $hh $r.Time.Date $r.Time.Date.AddDays(1)
+    }
+    & $add 'Pokaż godzinę przed i po' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem; if (-not $r) { return }
+        Set-HistoryZoom $hh $r.First.AddHours(-1) $r.Last.AddHours(1)
+    }
+    & $add 'Pokaż od tego momentu' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem; if (-not $r -or -not $hh.Items.Count) { return }
+        Set-HistoryZoom $hh $r.First ($hh.Items[$hh.Items.Count - 1].Time.AddSeconds(1))
+    }
+    & $add 'Pokaż do tego momentu' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem; if (-not $r -or -not $hh.Items.Count) { return }
+        Set-HistoryZoom $hh $hh.Items[0].Time ($r.Last.AddSeconds(1))
+    }
+    & $add 'Cały zakres' { Set-HistoryZoom $script:HistWins[[int]$this.Tag] $null $null }
+    [void]$cm.Items.Add((New-Object System.Windows.Controls.Separator))
+    & $add 'Historia urządzenia (MAC) z tego zdarzenia' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem; if (-not $r -or $r.Kind -ne 'Event') { return }
+        Open-HistoryFromEvent $r.Items[0].E 'Mac' $hh.Ui.hRange.SelectedIndex $hh.Ui.hFrom.Text $hh.Ui.hTo.Text
+    }
+    & $add 'Historia użytkownika z tego zdarzenia' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem; if (-not $r -or $r.Kind -ne 'Event') { return }
+        Open-HistoryFromEvent $r.Items[0].E 'User' $hh.Ui.hRange.SelectedIndex $hh.Ui.hFrom.Text $hh.Ui.hTo.Text
+    }
+    & $add 'Historia komputera z tego zdarzenia' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem; if (-not $r -or $r.Kind -ne 'Event') { return }
+        Open-HistoryFromEvent $r.Items[0].E 'Computer' $hh.Ui.hRange.SelectedIndex $hh.Ui.hFrom.Text $hh.Ui.hTo.Text
+    }
+    [void]$cm.Items.Add((New-Object System.Windows.Controls.Separator))
+    & $add 'Kopiuj szczegóły' {
+        $hh = $script:HistWins[[int]$this.Tag]; if ($hh.Ui.hDetails.Text) { [System.Windows.Clipboard]::SetText($hh.Ui.hDetails.Text) }
+    }
+    & $add 'Kopiuj MAC' {
+        $hh = $script:HistWins[[int]$this.Tag]; $r = $hh.Ui.hList.SelectedItem
+        if ($r -and $r.Kind -eq 'Event' -and $r.Items[0].E.CallingStation) { [System.Windows.Clipboard]::SetText([string]$r.Items[0].E.CallingStation) }
+    }
+    return $cm
+}
+
+# Oś czasu jako tekst (do zgłoszenia / maila) - dokładnie to, co widać w oknie.
+function Get-HistoryText($H) {
+    if (-not $H.Rows -or $H.Rows.Count -eq 0) { return '' }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("Historia: $($H.Q.Label)  ($($H.RangeText))")
+    foreach ($r in $H.Rows) {
+        switch ($r.Kind) {
+            'Day' { [void]$sb.AppendLine(''); [void]$sb.AppendLine("== $($r.Title)  ($($r.Detail)) ==") }
+            'Event' {
+                $line = '{0,-8} {1,-14} {2}' -f $r.TimeStr, $r.SubTime, $r.Title
+                if ($r.Medium -or $r.Location) { $line += "  [$((@($r.Medium, $r.Location) | Where-Object { $_ }) -join ' ')]" }
+                [void]$sb.AppendLine($line)
+                [void]$sb.AppendLine("                        $($r.Detail)")
+            }
+            default { [void]$sb.AppendLine("         --- $($r.Title)") }
+        }
+    }
+    return $sb.ToString().TrimEnd()
+}
+
+function Export-History($H) {
+    if (-not $H.View -or $H.View.Count -eq 0) { Set-HistoryStatus $H 'Brak zdarzeń w widoku.' 'Warn'; return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = 'CSV (*.csv)|*.csv'
+    $safe = ($H.Q.Label -replace '[^\w\-]+', '_').Trim('_')
+    $dlg.FileName = "NPS_historia_${safe}_$(Get-Date -Format 'yyyyMMdd_HHmm').csv"
+    if (-not $dlg.ShowDialog($H.Win)) { return }
+    $rows = foreach ($it in $H.View) {
+        $e = $it.E
+        [pscustomobject]@{
+            Czas = $it.Time.ToString('yyyy-MM-dd HH:mm:ss'); Zrodlo = $(if ($it.Both) { 'Security+log' } elseif ($it.Src -eq 'Log') { 'log' } else { 'Security' })
+            Wynik = $e.Result; Kod = $e.ReasonCode; Przyczyna = $e.Reason; Uzytkownik = $it.UserDisp; MAC = $e.CallingStation
+            Komputer = $it.Computer; Siec = $it.Medium; Switch = $it.Client; Port = $e.NasPort; SSID = $it.Ssid
+            Zasada = $e.Policy; Uwierzytelnianie = $e.AuthType; EAP = $e.EapType
+            IP = $(if ($e.PSObject.Properties['FramedIp']) { $e.FramedIp } else { '' })
+        }
+    }
+    $rows | Export-Csv -Path $dlg.FileName -Delimiter ';' -NoTypeInformation -Encoding UTF8
+    Set-HistoryStatus $H "Zapisano $($H.View.Count) zdarzeń: $($dlg.FileName)" 'OK'
+}
+
 # --- Zdarzenia -----------------------------------------------------------------------------
 $S = $script:Ctx.Sys
 foreach ($k in 'Result', 'Id', 'Source', 'Client') { $S[$k].Add_SelectionChanged({ Invoke-Filter $script:Ctx.Sys }) }
@@ -1969,6 +3312,17 @@ foreach ($n in 'Ev', 'Log') {
     $C.Export.Add_Click({ Invoke-Export $script:Ctx[$this.Tag] })
     $C.Copy.Add_Click({ $cx = $script:Ctx[$this.Tag]; if ($cx.Details.Text) { [System.Windows.Clipboard]::SetText($cx.Details.Text) } })
     $C.Grid.ContextMenu = New-GridMenu $n
+    # Dwuklik na wierszu = historia tego urządzenia (MAC), a bez MAC - użytkownika
+    $C.Grid.Add_MouseDoubleClick({
+            $dep = $_.OriginalSource
+            try {
+                while ($dep -and $dep -isnot [System.Windows.Controls.DataGridRow]) {
+                    $dep = $(if ($dep -is [System.Windows.Media.Visual]) { [System.Windows.Media.VisualTreeHelper]::GetParent($dep) } else { [System.Windows.LogicalTreeHelper]::GetParent($dep) })
+                }
+            }
+            catch { $dep = $null }
+            if ($dep) { Open-HistoryDefault $dep.Item }
+        })
     Set-ComboItems $C.Switch @()
     Set-ComboItems $C.Policy @()
     Set-ComboItems $C.Auth   @()
@@ -1980,6 +3334,13 @@ foreach ($k in 'ShowReq', 'ShowAcct') {
 
 $ui.btnLoad.Add_Click({ Start-EvLoad })
 $ui.btnLogLoad.Add_Click({ Start-LogLoad })
+
+# Historia: dla zaznaczonego wiersza bieżącej zakładki, a bez zaznaczenia - puste okno do wpisania
+$ui.btnHistory.Add_Click({
+        $cx = $(switch ($ui.tabMain.SelectedIndex) { 0 { $script:Ctx.Ev } 1 { $script:Ctx.Log } default { $null } })
+        if ($cx -and $cx.Grid.SelectedItem) { Open-HistoryDefault $cx.Grid.SelectedItem }
+        else { [void](Show-HistoryWindow) }
+    })
 
 $ui.cbRange.Add_SelectionChanged({ Update-CustomRange $ui.cbRange $ui.txtFrom $ui.txtTo })
 $ui.cbLogRange.Add_SelectionChanged({ Update-CustomRange $ui.cbLogRange $ui.txtLogFrom $ui.txtLogTo })
@@ -2035,5 +3396,8 @@ $win.Add_Closing({
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) { Set-Status 'Uwaga: okno nie działa z uprawnieniami administratora - odczyt dziennika Security może się nie udać.' 'Warn' }
 
-$win.Add_ContentRendered({ Start-EvLoad })
-[void]$win.ShowDialog()
+# $global:NpsViewerNoShow - testy (tests\Smoke-NpsViewer.ps1) wczytują skrypt bez pokazywania okna.
+if (-not $global:NpsViewerNoShow) {
+    $win.Add_ContentRendered({ Start-EvLoad })
+    [void]$win.ShowDialog()
+}

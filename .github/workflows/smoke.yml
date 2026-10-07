@@ -1,0 +1,32 @@
+name: Smoke test
+
+# Test dymny okien WPF (Windows PowerShell 5.1): logika osi czasu, okno główne i okno historii
+# (render do PNG - artefakt "smoke-output"), zapytanie Get-WinEvent z filtrem i wczytanie pliku .log.
+on:
+  push:
+    paths:
+      - 'Logi_NPS.ps1'
+      - 'tests/**'
+      - '.github/workflows/smoke.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Smoke test (Windows PowerShell 5.1)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run smoke test
+        shell: powershell
+        run: powershell -NoProfile -STA -ExecutionPolicy Bypass -File tests\Smoke-NpsViewer.ps1
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-output
+          path: smoke-output
+          if-no-files-found: ignore
