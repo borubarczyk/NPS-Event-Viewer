@@ -969,11 +969,20 @@ $script:EvLoader = {
         # po cichu zwraca "brak zdarzeń", gdy zapytanie okaże się za złożone (limit ok. 20 wyrażeń
         # XPath), a XML zgłasza błąd. Zakres ID (2 wyrażenia zamiast 8) zostawia miejsce na warianty MAC.
         # Porównanie Data='...' w dzienniku rozróżnia wielkość liter - stąd warianty małymi i dużymi.
-        $fmt = 'yyyy-MM-ddTHH:mm:ss.fffZ'
-        $time = "TimeCreated[@SystemTime&gt;='$($Start.ToUniversalTime().ToString($fmt))' and @SystemTime&lt;='$($End.ToUniversalTime().ToString($fmt))']"
-        $vals = (@($DataValues | ForEach-Object { "Data='$($_ -replace "[^0-9A-Za-z\-:\.]", '')'" })) -join ' or '
+        # Warianty dzielimy na kilka <Select> (suma wyników), żeby każdy miał mniej niż 20 wyrażeń.
+        # Czas zawsze w formacie niezależnym od ustawień regionalnych (inaczej np. kalendarz buddyjski
+        # albo kropka jako separator godziny dają zapytanie bez wyników).
+        $fmt = 'yyyy-MM-dd\THH:mm:ss.fff\Z'
+        $inv = [Globalization.CultureInfo]::InvariantCulture
+        $time = "TimeCreated[@SystemTime&gt;='$($Start.ToUniversalTime().ToString($fmt, $inv))' and @SystemTime&lt;='$($End.ToUniversalTime().ToString($fmt, $inv))']"
+        $vals = @($DataValues | ForEach-Object { "Data='$($_ -replace "[^0-9A-Za-z\-:\.]", '')'" })
+        $sel = ''
+        for ($i = 0; $i -lt $vals.Count; $i += 8) {
+            $part = $vals[$i..([Math]::Min($i + 7, $vals.Count - 1))] -join ' or '
+            $sel += "<Select Path='Security'>*[System[(EventID&gt;=6272 and EventID&lt;=6280 and EventID!=6275) and $time] and EventData[$part]]</Select>"
+        }
         $p.Remove('FilterHashtable')
-        $p.FilterXml = [xml]"<QueryList><Query Id='0' Path='Security'><Select Path='Security'>*[System[(EventID&gt;=6272 and EventID&lt;=6280 and EventID!=6275) and $time] and EventData[$vals]]</Select></Query></QueryList>"
+        $p.FilterXml = [xml]"<QueryList><Query Id='0' Path='Security'>$sel</Query></QueryList>"
     }
 
     try { $events = @(Get-WinEvent @p) }
@@ -1002,6 +1011,8 @@ $script:EvLoader = {
 
         $user    = [string]$d['SubjectUserName']
         $calling = [string]$d['CallingStationID']
+        # Przy VPN Calling-Station-Id to adres IP klienta - to nie MAC (192.168.100.200 też ma 12 cyfr)
+        $macHex  = $(if ($calling -match '^\s*\d{1,3}(\.\d{1,3}){3}\s*$' -or $calling.Contains('::')) { '' } else { ($calling -replace '[^0-9A-Fa-f]', '').ToUpper() })
 
         $o = [pscustomobject]@{
             Time           = $ev.TimeCreated
@@ -1031,7 +1042,7 @@ $script:EvLoader = {
             Reason         = $d['Reason']
             Server         = $ev.MachineName
             RecordId       = $ev.RecordId
-            MacHex         = ($calling -replace '[^0-9A-Fa-f]', '').ToUpper()
+            MacHex         = $macHex
             UserHex        = ($user -replace '[^0-9A-Fa-f]', '').ToUpper()
             SearchText     = ''
         }
@@ -1045,8 +1056,9 @@ $script:EvLoader = {
 $script:LogLoader = {
     # $MatchMode/$MatchValue (opcjonalne, okno historii): 'Mac' + 12 cyfr hex, 'User' / 'Computer'
     # + nazwa po normalizacji - zostają tylko wpisy tego urządzenia / użytkownika / komputera.
+    # $SkipReq: bez Access-Request / Challenge (okno historii, gdy ich nie pokazuje) - nie zajmują limitu.
     param([string[]]$Paths, [string]$Mask, [datetime]$Start, [datetime]$End, [int]$Max,
-          [string]$MatchMode = '', [string]$MatchValue = '', [bool]$MatchPartial = $false)
+          [string]$MatchMode = '', [string]$MatchValue = '', [bool]$MatchPartial = $false, [bool]$SkipReq = $false)
 
     # --- słowniki ---
     $reasonNames = @{
@@ -1117,6 +1129,7 @@ $script:LogLoader = {
                 $v = [string]$d[$k]
                 if (-not $v) { continue }
                 if ($k -eq 'User-Name' -and $v -notmatch '^[0-9A-Fa-f:\.\-\s]+$') { continue }
+                if ($v -match '^\s*\d{1,3}(\.\d{1,3}){3}\s*$' -or $v.Contains('::')) { continue }   # VPN: adres IP, nie MAC
                 $h = ($v -replace '[^0-9A-Fa-f]', '').ToUpper()
                 if ($k -eq 'User-Name' -and $h.Length -ne 12) { continue }
                 if ($MatchPartial) { if ($h -and $h.Contains($MatchValue)) { return $true } }
@@ -1162,7 +1175,7 @@ $script:LogLoader = {
     # "Ostatnie żądanie od tego samego klienta RADIUS" zostaje jako zapas dla wpisów bez Class:
     # przy WLC / switchu uwierzytelniającym wielu klientów naraz przypisywało MAC innego urządzenia.
     $reqByClass = @{}
-    $stat    = @{ Lines = 0; Parsed = 0; Skipped = 0; Unsupported = 0 }
+    $stat    = @{ Lines = 0; Parsed = 0; Skipped = 0; Unsupported = 0; Dropped = 0 }
     $errors  = New-Object System.Collections.Generic.List[string]
 
     foreach ($fi in $files) {
@@ -1219,9 +1232,10 @@ $script:LogLoader = {
                             }
                         }
                         if ($time -lt $Start) { continue }
+                        if ($SkipReq -and ($pt -eq '11' -or ($pt -eq '1' -and -not ($d['Reason-Code'] -and $d['Reason-Code'] -ne '0')))) { continue }
                         if ($MatchMode -and -not (Test-IdMatch $d)) { continue }
                         $queue.Enqueue($d)
-                        if ($Max -gt 0 -and $queue.Count -gt $Max) { [void]$queue.Dequeue() }
+                        if ($Max -gt 0 -and $queue.Count -gt $Max) { [void]$queue.Dequeue(); $stat.Dropped++ }
                     }
                     continue
                 }
@@ -1259,9 +1273,10 @@ $script:LogLoader = {
                     }
                 }
                 if ($time -lt $Start) { continue }
+                if ($SkipReq -and ($pt -eq '11' -or ($pt -eq '1' -and -not ($d['Reason-Code'] -and $d['Reason-Code'] -ne '0')))) { continue }
                 if ($MatchMode -and -not (Test-IdMatch $d)) { continue }
                 $queue.Enqueue($d)
-                if ($Max -gt 0 -and $queue.Count -gt $Max) { [void]$queue.Dequeue() }
+                if ($Max -gt 0 -and $queue.Count -gt $Max) { [void]$queue.Dequeue(); $stat.Dropped++ }
             }
         }
         catch { $errors.Add("$($fi.Name): $($_.Exception.Message)") }
@@ -1302,6 +1317,7 @@ $script:LogLoader = {
         $reason = ''
         if ($rc) { $reason = $(if ($reasonNames[$rc]) { $reasonNames[$rc] } else { "Kod $rc" }) }
         $calling = [string]$d['Calling-Station-Id']
+        $macHex  = $(if ($calling -match '^\s*\d{1,3}(\.\d{1,3}){3}\s*$' -or $calling.Contains('::')) { '' } else { ($calling -replace '[^0-9A-Fa-f]', '').ToUpper() })
         $fi = $d['#File']
 
         $o = [pscustomobject]@{
@@ -1341,7 +1357,7 @@ $script:LogLoader = {
             SessionTime    = $d['Acct-Session-Time']
             NasPortId      = $d['NAS-Port-Id']
             AcctTerminate  = $(if ($d['Acct-Terminate-Cause']) { $tc = [string]$d['Acct-Terminate-Cause']; if ($termCauses[$tc]) { $termCauses[$tc] } else { "kod $tc" } } else { '' })
-            MacHex         = ($calling -replace '[^0-9A-Fa-f]', '').ToUpper()
+            MacHex         = $macHex
             UserHex        = ($user -replace '[^0-9A-Fa-f]', '').ToUpper()
             Attrs          = $d
             SearchText     = ''
@@ -1359,6 +1375,7 @@ $script:LogLoader = {
         Parsed      = $stat.Parsed
         Skipped     = $stat.Skipped
         Unsupported = $stat.Unsupported
+        Dropped     = $stat.Dropped
         Errors      = @($errors)
     }
 }
@@ -1370,8 +1387,9 @@ $script:SysLoader = {
     $prov = ($Providers | ForEach-Object { "@Name='$($_ -replace "'", '')'" }) -join ' or '
     $cond = "Provider[$prov]"
     if ($Start -gt [datetime]::MinValue) {
-        $fmt = 'yyyy-MM-ddTHH:mm:ss.fffZ'
-        $cond += " and TimeCreated[@SystemTime>='$($Start.ToUniversalTime().ToString($fmt))' and @SystemTime<='$($End.ToUniversalTime().ToString($fmt))']"
+        $fmt = 'yyyy-MM-dd\THH:mm:ss.fff\Z'
+        $inv = [Globalization.CultureInfo]::InvariantCulture
+        $cond += " and TimeCreated[@SystemTime>='$($Start.ToUniversalTime().ToString($fmt, $inv))' and @SystemTime<='$($End.ToUniversalTime().ToString($fmt, $inv))']"
     }
     $xp = "*[System[$cond]]"
 
@@ -2356,7 +2374,7 @@ function Format-Mac([string]$Hex) {
 }
 
 function Get-EventSrc($e) {
-    if ($e.PSObject.Properties['File']) { return 'Log' }
+    if ($null -ne $e.File) { return 'Log' }   # tylko obiekty z plików .log mają nazwę pliku
     return 'Ev'
 }
 
@@ -2433,18 +2451,25 @@ function New-HistoryQuery([string]$Mode, [string]$Value, [bool]$Partial) {
 }
 
 function Test-HistoryMatch($e, $Q) {
+    # Najpierw tanie odrzucenie po surowym tekście (dziesiątki tysięcy zdarzeń), dopiero potem
+    # dokładne porównanie po normalizacji.
     switch ($Q.Mode) {
         'Mac' {
-            # MAC tylko z pełnych 12 cyfr: przy VPN Calling-Station-Id to adres IP, a nazwa
-            # użytkownika "abc.def" też "wygląda" na szesnastkową.
-            $userHex = Get-UserMac $e
-            $macHex = $(if (([string]$e.MacHex).Length -eq 12) { [string]$e.MacHex } else { '' })
+            # MAC tylko z pełnych 12 cyfr: przy VPN Calling-Station-Id to adres IP (loadery nie
+            # liczą z niego MacHex), a nazwa użytkownika "abc.def" też "wygląda" na szesnastkową.
+            $mh = [string]$e.MacHex
+            $inUser = ([string]$e.UserHex).Contains($Q.Hex)
+            if (-not ($inUser -or $mh.Contains($Q.Hex))) { return $false }
+            $userHex = $(if ($inUser) { Get-UserMac $e } else { '' })
+            $macHex = $(if ($mh.Length -eq 12) { $mh } else { '' })
             if ($Q.Partial) { return ($macHex -and $macHex.Contains($Q.Hex)) -or ($userHex -and $userHex.Contains($Q.Hex)) }
             return ($macHex -eq $Q.Hex) -or ($userHex -eq $Q.Hex)
         }
         'User' {
             foreach ($u in $e.User, $e.UserFQ, $e.Sam) {
-                $n = Get-NormUser ([string]$u)
+                $s = [string]$u
+                if (-not $s -or $s.IndexOf($Q.Norm, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                $n = Get-NormUser $s
                 if (-not $n) { continue }
                 if ($Q.Partial) { if ($n.Contains($Q.Norm)) { return $true } }
                 elseif ($n -eq $Q.Norm) { return $true }
@@ -2452,11 +2477,16 @@ function Test-HistoryMatch($e, $Q) {
             return $false
         }
         'Computer' {
-            $cands = New-Object System.Collections.Generic.List[string]
-            if ((Get-EventSrc $e) -eq 'Ev' -and $e.Machine -and $e.Machine -ne '-') { $cands.Add([string]$e.Machine) }
-            foreach ($u in $e.User, $e.UserFQ, $e.Sam) { if (Test-ComputerAccount ([string]$u)) { $cands.Add([string]$u) } }
-            foreach ($c in $cands) {
-                $n = Get-NormComputer $c
+            # Nazwa maszyny tylko z dziennika Security (w .log "Computer-Name" to serwer NPS),
+            # poza tym konta komputerów (host/..., NAZWA$) w nazwie użytkownika.
+            $isEv = -not $e.PSObject.Properties['File']
+            $vals = @($e.Machine, $e.User, $e.UserFQ, $e.Sam)
+            for ($i = 0; $i -lt 4; $i++) {
+                $s = [string]$vals[$i]
+                if (-not $s -or $s.IndexOf($Q.Norm, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
+                if ($i -eq 0) { if (-not $isEv -or $s -eq '-') { continue } }
+                elseif (-not (Test-ComputerAccount $s)) { continue }
+                $n = Get-NormComputer $s
                 if (-not $n) { continue }
                 if ($Q.Partial) { if ($n.Contains($Q.Norm)) { return $true } }
                 elseif ($n -eq $Q.Norm) { return $true }
@@ -2467,7 +2497,7 @@ function Test-HistoryMatch($e, $Q) {
     return $false
 }
 
-# Wartości do filtra po stronie serwera (Get-WinEvent -FilterHashtable Data = ...): dokładne
+# Wartości do filtra po stronie serwera (zapytanie XML z EventData/Data = ...): dokładne
 # zapisy MAC w formatach spotykanych u producentów. Dla użytkownika i komputera nie da się
 # przewidzieć zapisu (wielkość liter, domena, host/), więc tam skanujemy zakres i filtrujemy tutaj.
 function Get-HistoryDataValues($Q) {
@@ -2475,9 +2505,11 @@ function Get-HistoryDataValues($Q) {
     $h = $Q.Hex.ToUpperInvariant()
     $p = @(0..5 | ForEach-Object { $h.Substring($_ * 2, 2) })
     $forms = @(
-        ($p -join '-'), ($p -join ':'), $h,
-        ('{0}{1}.{2}{3}.{4}{5}' -f $p),
-        ('{0}{1}{2}-{3}{4}{5}' -f $p)
+        ($p -join '-'), ($p -join ':'), $h,               # Cisco / RFC 3580, Linux / UniFi, Aruba / HP
+        ('{0}{1}.{2}{3}.{4}{5}' -f $p),                   # Cisco IOS (aabb.ccdd.eeff)
+        ('{0}{1}{2}-{3}{4}{5}' -f $p),                    # HP ProCurve (aabbcc-ddeeff)
+        ('{0}{1}-{2}{3}-{4}{5}' -f $p),                   # Huawei / H3C / Comware (aabb-ccdd-eeff)
+        ($p -join '.')                                    # aa.bb.cc.dd.ee.ff
     )
     $all = New-Object System.Collections.Generic.List[string]
     foreach ($f in $forms) { $all.Add($f); $all.Add($f.ToLowerInvariant()) }
@@ -2486,36 +2518,47 @@ function Get-HistoryDataValues($Q) {
 
 # --- Elementy osi czasu --------------------------------------------------------------------
 # Zdarzenie z obu źródeł opakowane w jeden typ, z policzonymi raz polami do osi czasu.
+# Wykonywane w runspace w tle (Start-HistoryLoad), więc bez potoków - liczy się każda milisekunda.
 function New-HistoryItem($e, [string]$Src, $Q) {
     $medium = Get-EventMedium $e
     $client = Get-EventClientName $e
     $ssid   = Get-EventSsid $e
-    $port   = $(if ($e.PSObject.Properties['NasPortId'] -and $e.NasPortId) { [string]$e.NasPortId } else { [string]$e.NasPort })
-    if ($port -eq '-') { $port = '' }
+    # Port do porównań: NAS-Port (numer) jest w obu źródłach. NAS-Port-Id (nazwa, np.
+    # GigabitEthernet1/0/12) jest tylko w plikach .log - służy wyłącznie do opisu.
+    $portKey = [string]$e.NasPort; if ($portKey -eq '-') { $portKey = '' }
+    $portTxt = $portKey
+    if ($e.NasPortId) { $portTxt = [string]$e.NasPortId }   # tylko w obiektach z plików .log
     if ($medium -eq 'Wi-Fi') {
-        $locText = (@($(if ($ssid) { "SSID $ssid" }), $client) | Where-Object { $_ }) -join ' · '
-        $locKey  = "Wi-Fi|$client|$ssid"
+        $portKey = ''
+        $locText = $(if ($ssid -and $client) { "SSID $ssid · $client" } elseif ($ssid) { "SSID $ssid" } else { $client })
+    }
+    elseif ($medium -eq 'VPN') {
+        # NAS-Port przy VPN to numer tunelu / sesji - zmienia się przy każdym połączeniu
+        $portKey = ''
+        $locText = $client
     }
     else {
-        $locText = (@($client, $(if ($port) { "port $port" })) | Where-Object { $_ }) -join ' · '
-        $locKey  = "$medium|$client|$port"
+        $locText = $(if ($portTxt -and $client) { "$client · port $portTxt" } elseif ($portTxt) { "port $portTxt" } else { $client })
     }
-    if (-not $client) { $locKey = '' }
 
     $kind = [string]$e.Kind; if (-not $kind) { $kind = 'Resp' }
     $userDisp = Get-EventUserDisplay $e
+    $userN = Get-NormUser ([string]$e.User)
     $comp = Get-EventComputer $e
+    $macHex = [string]$e.MacHex; if ($macHex.Length -ne 12) { $macHex = '' }
 
-    $parts = New-Object System.Collections.Generic.List[string]
+    $parts = [System.Collections.Generic.List[string]]::new()
     if ($Q.Mode -ne 'User' -and $userDisp) { $parts.Add("użytkownik $userDisp") }
-    if ($Q.Mode -ne 'Mac' -and $e.CallingStation -and $e.CallingStation -ne '-') { $parts.Add("MAC $($e.CallingStation)") }
+    if ($Q.Mode -ne 'Mac' -and $e.CallingStation -and $e.CallingStation -ne '-') { $parts.Add($(if ($macHex) { "MAC $($e.CallingStation)" } else { "z adresu $($e.CallingStation)" })) }
     if ($Q.Mode -ne 'Computer' -and $comp -and -not (Test-ComputerAccount $userDisp)) { $parts.Add("komputer $($comp.ToUpperInvariant())") }
     if ($e.Policy -and $e.Policy -ne '-') { $parts.Add("zasada: $($e.Policy)") }
-    $auth = (@($e.AuthType, $e.EapType) | Where-Object { $_ -and $_ -ne '-' } | Select-Object -Unique) -join ' / '
+    $at = [string]$e.AuthType; if ($at -eq '-') { $at = '' }
+    $et = [string]$e.EapType; if ($et -eq '-') { $et = '' }
+    $auth = $(if ($at -and $et -and $at -ne $et) { "$at / $et" } elseif ($at) { $at } else { $et })
     if ($auth) { $parts.Add($auth) }
-    if ($e.PSObject.Properties['FramedIp'] -and $e.FramedIp) { $parts.Add("IP $($e.FramedIp)") }
-    if ($e.PSObject.Properties['SessionTime'] -and $e.SessionTime -match '^\d+$') { $parts.Add("czas sesji $(Format-Span ([TimeSpan]::FromSeconds([double]$e.SessionTime)))") }
-    if ($e.PSObject.Properties['AcctTerminate'] -and $e.AcctTerminate) { $parts.Add("koniec sesji: $($e.AcctTerminate)") }
+    if ($e.FramedIp) { $parts.Add("IP $($e.FramedIp)") }
+    if ($e.SessionTime -and $e.SessionTime -match '^\d+$') { $parts.Add("czas sesji $(Format-Span ([TimeSpan]::FromSeconds([double]$e.SessionTime)))") }
+    if ($e.AcctTerminate) { $parts.Add("koniec sesji: $($e.AcctTerminate)") }
 
     $title = [string]$e.Result
     if ($e.Level -ne 'OK' -and $e.ReasonCode -and $e.ReasonCode -ne '0' -and $e.ReasonCode -ne '-') {
@@ -2532,42 +2575,41 @@ function New-HistoryItem($e, [string]$Src, $Q) {
         Level    = [string]$e.Level
         E        = $e
         Medium   = $medium
-        LocKey   = $locKey
+        PortKey  = $portKey
         LocText  = $locText
         Ssid     = $ssid
         Client   = $client
-        UserN    = Get-NormUser ([string]$e.User)
+        UserN    = $userN
         UserDisp = $userDisp
         Computer = $comp
-        MacHex   = [string]$e.MacHex
+        MacHex   = $macHex
         Title    = $title
         Parts    = $parts
-        Sig      = '{0}|{1}|{2}|{3}|{4}|{5}|{6}' -f $e.Level, $e.Result, $e.ReasonCode, $locKey, (Get-NormUser ([string]$e.User)), $e.MacHex, $kind
+        Sig      = '{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}|{9}' -f $e.Level, $e.Result, $e.ReasonCode, $client, $medium, $ssid, $portKey, $userN, $macHex, $kind
     }
 }
 
-# Łączy zdarzenia z dziennika Security i z plików .log. Odpowiedź (Accept/Reject) z logu, która
+# Łączy elementy z dziennika Security i z plików .log. Odpowiedź (Accept/Reject) z logu, która
 # ma swój odpowiednik w dzienniku Security (ten sam wynik i urządzenie, do 2 s różnicy), nie jest
 # pokazywana drugi raz - zdarzenie z Security dostaje tylko oznaczenie "Security + log".
-function Merge-HistoryItems($EvEvents, $LogEvents, $Q) {
-    $items = New-Object System.Collections.Generic.List[object]
+function Merge-HistoryItems($EvItems, $LogItems) {
+    $all = New-Object System.Collections.Generic.List[object]
     $index = @{}
-    foreach ($e in $EvEvents) {
-        $it = New-HistoryItem $e 'Ev' $Q
-        $items.Add($it)
+    foreach ($it in $EvItems) {
+        $all.Add($it)
         $k = '{0}|{1}' -f $it.Level, [Math]::Floor($it.Time.Ticks / [TimeSpan]::TicksPerSecond)
-        if (-not $index.ContainsKey($k)) { $index[$k] = New-Object System.Collections.Generic.List[object] }
-        $index[$k].Add($it)
+        $l = $index[$k]
+        if (-not $l) { $l = [System.Collections.Generic.List[object]]::new(); $index[$k] = $l }
+        $l.Add($it)
     }
-    foreach ($e in $LogEvents) {
-        $it = New-HistoryItem $e 'Log' $Q
+    foreach ($it in $LogItems) {
         if ($it.Kind -eq 'Resp' -and $index.Count) {
             $sec = [Math]::Floor($it.Time.Ticks / [TimeSpan]::TicksPerSecond)
             $dup = $null
             for ($d = -2; $d -le 2 -and -not $dup; $d++) {
-                $k = '{0}|{1}' -f $it.Level, ($sec + $d)
-                if (-not $index.ContainsKey($k)) { continue }
-                foreach ($c in $index[$k]) {
+                $l = $index['{0}|{1}' -f $it.Level, ($sec + $d)]
+                if (-not $l) { continue }
+                foreach ($c in $l) {
                     if ($c.Both) { continue }
                     $same = $(if ($c.MacHex -and $it.MacHex) { $c.MacHex -eq $it.MacHex } else { $c.UserN -and $c.UserN -eq $it.UserN })
                     if ($same) { $dup = $c; break }
@@ -2575,10 +2617,18 @@ function Merge-HistoryItems($EvEvents, $LogEvents, $Q) {
             }
             if ($dup) { $dup.Both = $true; continue }
         }
-        $items.Add($it)
+        $all.Add($it)
     }
-    $sorted = New-Object System.Collections.Generic.List[object]
-    foreach ($x in ($items | Sort-Object Time)) { $sorted.Add($x) }
+    # Sortowanie po czasie przez Array.Sort kluczy liczbowych (Sort-Object przy dziesiątkach tysięcy
+    # obiektów trwa sekundy). Klucz = czas * 10^7 + pozycja, więc przy równym czasie decyduje kolejność
+    # wejścia: loadery podają najnowsze najpierw, czyli późniejsza pozycja = wcześniejszy wpis.
+    # (Sortujemy same klucze - tablicę obiektów PowerShell przy wywołaniu metody kopiuje.)
+    $n = $all.Count
+    $keys = [decimal[]]::new($n)
+    for ($i = 0; $i -lt $n; $i++) { $keys[$i] = [decimal]$all[$i].Time.Ticks * 10000000 + ($n - $i) }
+    [Array]::Sort($keys)
+    $sorted = New-Object System.Collections.Generic.List[object] $n
+    foreach ($k in $keys) { $sorted.Add($all[$n - [int]($k % 10000000)]) }
     return , $sorted
 }
 
@@ -2588,8 +2638,8 @@ function New-HistoryRow([string]$Kind, [datetime]$Time) {
         Medium = ''; MediumBg = 'Transparent'; MediumVis = 'Collapsed'; Location = ''; Detail = ''
         DayVis = $(if ($Kind -eq 'Day') { 'Visible' } else { 'Collapsed' })
         EventVis = $(if ($Kind -eq 'Event') { 'Visible' } else { 'Collapsed' })
-        MarkerVis = $(if ($Kind -in 'Change', 'Gap', 'Who') { 'Visible' } else { 'Collapsed' })
-        Items = New-Object System.Collections.Generic.List[object]
+        MarkerVis = $(if ($Kind -eq 'Change' -or $Kind -eq 'Gap' -or $Kind -eq 'Who') { 'Visible' } else { 'Collapsed' })
+        Items = [System.Collections.Generic.List[object]]::new()
         Sig = ''; First = $Time; Last = $Time; Info = ''
     }
 }
@@ -2600,6 +2650,27 @@ function Format-HistoryLocation($It) {
     return $l
 }
 
+# Czy zdarzenie jest w innym miejscu sieci niż ostatnie znane ($S - stan przekazywany między
+# wywołaniami)? Porównujemy tylko pola znane po obu stronach: wpis accounting bez typu portu
+# albo zdarzenie Security bez numeru portu nie oznacza zmiany. Zwraca $true przy zmianie;
+# poprzednie miejsce jest wtedy w $S.Prev.
+function Step-HistoryLocation([hashtable]$S, $It) {
+    if (-not $It.Client) { return $false }
+    if (-not $S.It) { $S.It = $It; $S.Medium = $It.Medium; $S.Ssid = $It.Ssid; $S.Port = $It.PortKey; return $false }
+    $chg = ($S.It.Client -ne $It.Client) -or
+           ($S.Medium -and $It.Medium -and $S.Medium -ne $It.Medium) -or
+           ($S.Ssid -and $It.Ssid -and $S.Ssid -ne $It.Ssid) -or
+           ($S.Port -and $It.PortKey -and $S.Port -ne $It.PortKey)
+    if ($chg) {
+        $S.Prev = $S.It; $S.It = $It; $S.Medium = $It.Medium; $S.Ssid = $It.Ssid; $S.Port = $It.PortKey
+        return $true
+    }
+    if (-not $S.Medium -and $It.Medium) { $S.Medium = $It.Medium; $S.It = $It }
+    if (-not $S.Ssid) { $S.Ssid = $It.Ssid }
+    if (-not $S.Port -and $S.Medium -ne 'Wi-Fi' -and $S.Medium -ne 'VPN') { $S.Port = $It.PortKey }
+    return $false
+}
+
 # Buduje wiersze osi czasu z (przefiltrowanych) zdarzeń posortowanych rosnąco po czasie:
 # zdarzenia (z grupowaniem powtórzeń), znaczniki zmian sieci / urządzenia / użytkownika,
 # przerwy dłuższe niż $script:HistGapMinutes i nagłówki dni.
@@ -2607,10 +2678,11 @@ function Build-HistoryRows($Items, $Q, [hashtable]$Opt) {
     $seq     = New-Object System.Collections.Generic.List[object]
     $gap     = [TimeSpan]::FromMinutes($script:HistGapMinutes)
     $prev    = $null
-    $lastLoc = $null
+    $loc     = @{}
     $lastWho = $null
     $cur     = $null
     $changes = 0
+    $whatTxt = $(if ($Q.Mode -eq 'User') { 'użytkownika' } elseif ($Q.Mode -eq 'Computer') { 'komputera' } else { 'urządzenia' })
 
     foreach ($it in $Items) {
         if ($prev) {
@@ -2619,32 +2691,30 @@ function Build-HistoryRows($Items, $Q, [hashtable]$Opt) {
                 $m = New-HistoryRow 'Gap' $it.Time
                 $m.Title = "brak zdarzeń przez $(Format-Span $dt)"
                 $m.TitleColor = '#8A90A2'
-                $m.Info = "Od $($prev.Time.ToString('yyyy-MM-dd HH:mm:ss')) do $($it.Time.ToString('yyyy-MM-dd HH:mm:ss')) nie było zdarzeń tego $(if ($Q.Mode -eq 'User') { 'użytkownika' } elseif ($Q.Mode -eq 'Computer') { 'komputera' } else { 'urządzenia' }). Urządzenie mogło być wyłączone, odłączone albo po prostu nie uwierzytelniało się ponownie (zależy od ustawień reauth na switchu / AP)."
+                $m.Info = "Od $($prev.Time.ToString('yyyy-MM-dd HH:mm:ss')) do $($it.Time.ToString('yyyy-MM-dd HH:mm:ss')) nie było zdarzeń tego $whatTxt. Urządzenie mogło być wyłączone, odłączone albo po prostu nie uwierzytelniało się ponownie (zależy od ustawień reauth na switchu / AP)."
                 $seq.Add($m)
                 $cur = $null
             }
         }
 
         # Zmiana miejsca w sieci (LAN <-> Wi-Fi, inny switch / port / SSID)
-        if ($it.LocKey) {
-            if ($lastLoc -and $lastLoc.LocKey -ne $it.LocKey) {
-                $changes++
-                if ($Opt.Markers) {
-                    $m = New-HistoryRow 'Change' $it.Time
-                    $kindTxt = $(if ($lastLoc.Medium -ne $it.Medium -and $lastLoc.Medium -and $it.Medium) { "zmiana sieci $($lastLoc.Medium) → $($it.Medium)" } else { 'zmiana miejsca w sieci' })
-                    $m.Title = "${kindTxt}:  $(Format-HistoryLocation $lastLoc)  →  $(Format-HistoryLocation $it)"
-                    $m.TitleColor = '#93C5FD'
-                    $m.MediumBg = '#1F2A40'
-                    $m.Info = "Poprzednie zdarzenie ($($lastLoc.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $lastLoc)`nNastępne ($($it.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $it)"
-                    $seq.Add($m)
-                    $cur = $null
-                }
+        if (Step-HistoryLocation $loc $it) {
+            $changes++
+            if ($Opt.Markers) {
+                $from = $loc.Prev
+                $m = New-HistoryRow 'Change' $it.Time
+                $kindTxt = $(if ($from.Medium -ne $it.Medium -and $from.Medium -and $it.Medium) { "zmiana sieci $($from.Medium) → $($it.Medium)" } else { 'zmiana miejsca w sieci' })
+                $m.Title = "${kindTxt}:  $(Format-HistoryLocation $from)  →  $(Format-HistoryLocation $it)"
+                $m.TitleColor = '#93C5FD'
+                $m.MediumBg = '#1F2A40'
+                $m.Info = "Poprzednie miejsce ($($from.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $from)`nNastępne ($($it.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $it)"
+                $seq.Add($m)
+                $cur = $null
             }
-            $lastLoc = $it
         }
 
         # Inny użytkownik na tym samym urządzeniu (tryb MAC / komputer) albo inne urządzenie
-        # tego samego użytkownika (tryb użytkownik)
+        # tego samego użytkownika (tryb użytkownik; MacHex jest pusty, gdy to nie MAC - np. VPN)
         $who = $(if ($Q.Mode -eq 'User') { $it.MacHex } else { $it.UserN })
         if ($who) {
             if ($Opt.Markers -and $lastWho -and $lastWho.Who -ne $who) {
@@ -2660,8 +2730,7 @@ function Build-HistoryRows($Items, $Q, [hashtable]$Opt) {
             $lastWho = @{ Who = $who; Disp = $(if ($it.UserDisp) { $it.UserDisp } else { $who }) }
         }
 
-        $sameDay = $cur -and $cur.Last.Date -eq $it.Time.Date
-        if ($Opt.Group -and $cur -and $cur.Sig -eq $it.Sig -and $sameDay -and ($it.Time - $cur.Last) -le $gap) {
+        if ($Opt.Group -and $cur -and $cur.Sig -eq $it.Sig -and $cur.Last.Date -eq $it.Time.Date -and ($it.Time - $cur.Last) -le $gap) {
             $cur.Items.Add($it)
             $cur.Last = $it.Time
             $prev = $it
@@ -2691,13 +2760,10 @@ function Build-HistoryRows($Items, $Q, [hashtable]$Opt) {
             $edge = $(if ($Opt.Newest) { "od $($r.First.ToString('HH:mm:ss'))" } else { "do $($r.Last.ToString('HH:mm:ss'))" })
             $r.SubTime = "×$n · $edge"
         }
-        $parts = New-Object System.Collections.Generic.List[string]
-        foreach ($p in $last.Parts) { $parts.Add($p) }
-        $both = @($r.Items | Where-Object { $_.Both }).Count -gt 0
-        $srcs = @($r.Items | ForEach-Object { $_.Src } | Select-Object -Unique)
-        $srcTxt = $(if ($both -or $srcs.Count -gt 1) { 'Security + log' } elseif ($srcs[0] -eq 'Log') { 'log .log' } else { 'Security' })
-        $parts.Add($srcTxt)
-        $r.Detail = $parts -join '  ·  '
+        $both = $false; $hasEv = $false; $hasLog = $false
+        foreach ($x in $r.Items) { if ($x.Both) { $both = $true }; if ($x.Src -eq 'Log') { $hasLog = $true } else { $hasEv = $true } }
+        $srcTxt = $(if ($both -or ($hasEv -and $hasLog)) { 'Security + log' } elseif ($hasLog) { 'log .log' } else { 'Security' })
+        $r.Detail = $(if ($last.Parts.Count) { ($last.Parts -join '  ·  ') + '  ·  ' + $srcTxt } else { $srcTxt })
     }
 
     if ($Opt.Newest) { $seq.Reverse() }
@@ -2705,21 +2771,21 @@ function Build-HistoryRows($Items, $Q, [hashtable]$Opt) {
     # Nagłówki dni (z liczbą zdarzeń i odmów danego dnia)
     $dayStats = @{}
     foreach ($it in $Items) {
-        $k = $it.Time.Date
-        if (-not $dayStats.ContainsKey($k)) { $dayStats[$k] = @{ N = 0; Err = 0 } }
-        $dayStats[$k].N++
-        if ($it.Level -eq 'Error') { $dayStats[$k].Err++ }
+        $st = $dayStats[$it.Time.Date]
+        if (-not $st) { $st = @{ N = 0; Err = 0 }; $dayStats[$it.Time.Date] = $st }
+        $st.N++
+        if ($it.Level -eq 'Error') { $st.Err++ }
     }
     $rows = New-Object System.Collections.Generic.List[object]
     $day = $null
     foreach ($r in $seq) {
         if ($day -ne $r.Time.Date) {
             $day = $r.Time.Date
-            $h = New-HistoryRow 'Day' $day
-            $h.Title = $day.ToString('dddd, d MMMM yyyy', $script:PlCulture)
+            $hd = New-HistoryRow 'Day' $day
+            $hd.Title = $day.ToString('dddd, d MMMM yyyy', $script:PlCulture)
             $st = $dayStats[$day]
-            if ($st) { $h.Detail = "zdarzeń: $($st.N)" + $(if ($st.Err) { "  ·  odmów: $($st.Err)" } else { '' }) }
-            $rows.Add($h)
+            if ($st) { $hd.Detail = "zdarzeń: $($st.N)" + $(if ($st.Err) { "  ·  odmów: $($st.Err)" } else { '' }) }
+            $rows.Add($hd)
         }
         $rows.Add($r)
     }
@@ -2771,6 +2837,7 @@ function Show-HistoryWindow {
         Base = New-Object System.Collections.Generic.List[object]
         ZoomFrom = $null; ZoomTo = $null; Buckets = @(); Busy = $false
         PS = @{}; Handles = @{}; LoadStarted = $null; Range = $null; Max = 0; Prefilter = $false; RangeText = ''
+        TabMode = $false; ReqLoaded = $true; BaseVer = 0; StripCache = $null
     }
     $hx.SelectNodes('//*[@Name]') | ForEach-Object {
         $c = $hw.FindName($_.Name)
@@ -2812,6 +2879,12 @@ function Show-HistoryWindow {
         $u[$k].Add_Checked({ Update-HistoryView $script:HistWins[[int]$this.Tag] })
         $u[$k].Add_Unchecked({ Update-HistoryView $script:HistWins[[int]$this.Tag] })
     }
+    # Access-Request / Challenge z plików .log są wczytywane tylko, gdy są pokazywane - po
+    # zaznaczeniu trzeba je doczytać.
+    $u.hReq.Add_Checked({
+            $hh = $script:HistWins[[int]$this.Tag]
+            if ($hh -and $hh.Q -and -not $hh.ReqLoaded -and -not $hh.Busy) { Start-HistoryLoad $hh }
+        })
     $u.hList.Add_SelectionChanged({ $hh = $script:HistWins[[int]$this.Tag]; Show-HistoryDetails $hh $hh.Ui.hList.SelectedItem })
     $u.hList.ContextMenu = New-HistoryMenu $id
     $u.hZoomClear.Add_Click({ Set-HistoryZoom $script:HistWins[[int]$this.Tag] $null $null })
@@ -2825,7 +2898,7 @@ function Show-HistoryWindow {
             $hh = $script:HistWins[[int]$this.Tag]
             if ($hh) {
                 $hh.Timer.Stop()
-                foreach ($ps in $hh.PS.Values) { try { $ps.Stop(); $ps.Dispose() } catch { } }
+                Stop-HistoryWorkers $hh
                 $script:HistWins.Remove([int]$this.Tag)
             }
         })
@@ -2865,6 +2938,77 @@ function Open-HistoryDefault($e) {
     if ($hex -and $hex.Length -eq 12) { Open-HistoryFromEvent $e 'Mac' } else { Open-HistoryFromEvent $e 'User' }
 }
 
+# --- Wczytywanie historii w tle ------------------------------------------------------------
+# Dopasowanie i budowa elementów osi czasu odbywa się w runspace w tle: przy dziesiątkach tysięcy
+# zdarzeń trwa to sekundy i na wątku okna zamroziłoby wszystkie okna aplikacji. Runspace nie
+# widzi funkcji skryptu, więc dostaje ich tekst (te same funkcje co w oknie - jedno źródło).
+$script:HistWorkerFunctions = ''
+function Get-HistoryWorkerFunctions {
+    if (-not $script:HistWorkerFunctions) {
+        $names = 'Get-HexMac', 'Get-NormUser', 'Get-NormComputer', 'Test-ComputerAccount', 'Get-UserMac', 'Format-Mac',
+            'Get-EventSrc', 'Get-EventUserDisplay', 'Get-EventComputer', 'Get-EventSsid', 'Get-EventMedium',
+            'Get-EventClientName', 'Format-Span', 'Test-HistoryMatch', 'New-HistoryItem'
+        $script:HistWorkerFunctions = (@($names | ForEach-Object { (Get-Command -Name $_ -CommandType Function | Select-Object -First 1).ScriptBlock.Ast.Extent.Text })) -join "`r`n`r`n"
+    }
+    return $script:HistWorkerFunctions
+}
+
+# $Loader (tekst $script:EvLoader / $script:LogLoader) z argumentami albo gotowe $Objects (dane
+# z zakładek). Zwraca jeden obiekt: elementy osi czasu, liczbę zdarzeń ze źródła i podsumowanie loadera.
+$script:HistWorker = {
+    param([string]$Functions, [string]$Loader, [object[]]$LoaderArgs, [object[]]$Objects, $Q, [string]$Src)
+    . ([scriptblock]::Create($Functions))
+    $items = New-Object System.Collections.Generic.List[object]
+    $summary = $null
+    $raw = 0
+    $source = $(if ($Loader) { & ([scriptblock]::Create($Loader)) @LoaderArgs } else { $Objects })
+    foreach ($r in $source) {
+        if ($null -eq $r) { continue }
+        if ($r.PSObject.Properties['IsSummary']) { $summary = $r; continue }
+        $raw++
+        if (Test-HistoryMatch $r $Q) { $items.Add((New-HistoryItem $r $Src $Q)) }
+    }
+    [pscustomobject]@{ HistWorker = $true; Items = $items; Raw = $raw; Summary = $summary }
+}
+
+function Start-HistoryWorker($H, [string]$Src, [string]$Loader, $LoaderArgs, $Objects, $Q) {
+    $ps = [powershell]::Create()
+    [void]$ps.AddScript($script:HistWorker).AddArgument((Get-HistoryWorkerFunctions)).AddArgument($Loader).AddArgument($LoaderArgs).AddArgument($Objects).AddArgument($Q).AddArgument($Src)
+    $H.PS[$Src] = $ps
+    $H.Handles[$Src] = $ps.BeginInvoke()
+}
+
+# Zatrzymanie bez czekania: PowerShell.Stop() czeka, aż Get-WinEvent skończy bieżące skanowanie
+# dziennika (przy filtrze MAC i dużym / zdalnym dzienniku - minuty), a w tym czasie wszystkie okna
+# stoją. BeginStop wraca od razu; zatrzymane instancje sprząta zegar.
+$script:HistStopping = New-Object System.Collections.Generic.List[object]
+$script:HistReaper = New-Object System.Windows.Threading.DispatcherTimer
+$script:HistReaper.Interval = [TimeSpan]::FromSeconds(2)
+$script:HistReaper.Add_Tick({
+        foreach ($ps in @($script:HistStopping)) {
+            if ([string]$ps.InvocationStateInfo.State -in 'Stopped', 'Completed', 'Failed', 'NotStarted') {
+                try { $ps.Dispose() } catch { }
+                [void]$script:HistStopping.Remove($ps)
+            }
+        }
+        if (-not $script:HistStopping.Count) { $script:HistReaper.Stop() }
+    })
+
+function Stop-HistoryWorkers($H) {
+    foreach ($ps in @($H.PS.Values)) {
+        try {
+            if ([string]$ps.InvocationStateInfo.State -in 'Running', 'Stopping') {
+                if ([string]$ps.InvocationStateInfo.State -eq 'Running') { [void]$ps.BeginStop($null, $null) }
+                $script:HistStopping.Add($ps)
+            }
+            else { $ps.Dispose() }
+        }
+        catch { }
+    }
+    $H.PS = @{}; $H.Handles = @{}
+    if ($script:HistStopping.Count) { $script:HistReaper.Start() }
+}
+
 function Start-HistoryLoad($H) {
     if (-not $H -or $H.Busy) { return }
     $u = $H.Ui
@@ -2875,64 +3019,68 @@ function Start-HistoryLoad($H) {
         Set-HistoryStatus $H "Wpisz $what." 'Warn'
         return
     }
+
+    # Najpierw wszystkie sprawdzenia: nieudany start nie może zmienić tytułu ani zapytania osi
+    # czasu, która jest na ekranie (kopiowanie / eksport podpisałyby ją cudzą nazwą).
+    $tab = ($u.hRange.SelectedIndex -eq 0)
+    $nEv = $script:Ctx.Ev.All.Count; $nLog = $script:Ctx.Log.All.Count
+    if ($tab) {
+        if (($nEv + $nLog) -eq 0) {
+            Set-HistoryStatus $H 'W zakładkach nie ma jeszcze danych - wybierz zakres czasu (np. Ostatnie 7 dni) i kliknij Pokaż historię.' 'Warn'
+            Set-HistoryState $H 'Brak danych' 'Warn'
+            return
+        }
+    }
+    else {
+        try { $range = Get-HistoryRange $H }
+        catch { Set-HistoryStatus $H "Nieprawidłowy zakres czasu: $($_.Exception.Message)" 'Error'; return }
+        $useEv = [bool]$u.hSrcEv.IsChecked
+        $useLog = [bool]$u.hSrcLog.IsChecked
+        if (-not $useEv -and -not $useLog) { Set-HistoryStatus $H 'Zaznacz co najmniej jedno źródło (dziennik Security albo pliki .log).' 'Warn'; return }
+        $paths = @($ui.txtLogPath.Text -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        if ($useLog -and -not $paths.Count) { Set-HistoryStatus $H 'Podaj lokalizację plików .log w zakładce Pliki logów RADIUS.' 'Warn'; return }
+        $mask = $ui.txtLogMask.Text.Trim(); if (-not $mask) { $mask = 'IN*.log' }
+    }
+
     $H.Q = $q
     $H.ZoomFrom = $null; $H.ZoomTo = $null
     $u.hTitle.Text = "Historia: $($q.Label)"
     $H.Win.Title = "Historia - $($q.Label)"
-
-    if ($u.hRange.SelectedIndex -eq 0) {
-        $ev = New-Object System.Collections.Generic.List[object]
-        $lg = New-Object System.Collections.Generic.List[object]
-        foreach ($e in $script:Ctx.Ev.All) { if (Test-HistoryMatch $e $q) { $ev.Add($e) } }
-        foreach ($e in $script:Ctx.Log.All) { if (Test-HistoryMatch $e $q) { $lg.Add($e) } }
-        $H.Items = Merge-HistoryItems $ev $lg $q
-        $H.RangeText = 'dane wczytane w zakładkach'
-        Update-HistorySummary $H
-        Update-HistoryView $H
-        if (($script:Ctx.Ev.All.Count + $script:Ctx.Log.All.Count) -eq 0) {
-            Set-HistoryStatus $H 'W zakładkach nie ma jeszcze danych - wybierz zakres czasu (np. Ostatnie 7 dni) i kliknij Pokaż historię.' 'Warn'
-            Set-HistoryState $H 'Brak danych' 'Warn'
-        }
-        else {
-            $note = $(if ($H.Items.Count -eq 0) { ' Nic nie znaleziono - wybierz dłuższy zakres czasu, żeby przeszukać dziennik / logi.' } else { '' })
-            Set-HistoryStatus $H "Z danych zakładek: dziennik Security $($ev.Count), pliki .log $($lg.Count).$note" $(if ($H.Items.Count) { 'OK' } else { 'Warn' })
-            Set-HistoryState $H "$($H.Items.Count) zdarzeń" $(if ($H.Items.Count) { 'OK' } else { 'Warn' })
-        }
-        return
-    }
-
-    try { $range = Get-HistoryRange $H }
-    catch { Set-HistoryStatus $H "Nieprawidłowy zakres czasu: $($_.Exception.Message)" 'Error'; return }
-    $useEv = [bool]$u.hSrcEv.IsChecked
-    $useLog = [bool]$u.hSrcLog.IsChecked
-    if (-not $useEv -and -not $useLog) { Set-HistoryStatus $H 'Zaznacz co najmniej jedno źródło (dziennik Security albo pliki .log).' 'Warn'; return }
-    $paths = @($ui.txtLogPath.Text -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-    if ($useLog -and -not $paths.Count) { Set-HistoryStatus $H 'Podaj lokalizację plików .log w zakładce Pliki logów RADIUS.' 'Warn'; return }
-    $mask = $ui.txtLogMask.Text.Trim(); if (-not $mask) { $mask = 'IN*.log' }
-
-    $H.Max = Get-MaxValue $u.hMax 20000
-    $H.Range = $range
-    $H.RangeText = Format-Range $range
+    $H.TabMode = $tab
     $H.PS = @{}; $H.Handles = @{}
     $H.Prefilter = $false
-    if ($useEv) {
-        $dv = Get-HistoryDataValues $q
-        $H.Prefilter = [bool]$dv
-        $ps = [powershell]::Create()
-        [void]$ps.AddScript($script:EvLoader).AddArgument($ui.txtServer.Text.Trim()).AddArgument($range[0]).AddArgument($range[1]).AddArgument($H.Max).AddArgument($dv)
-        $H.PS['Ev'] = $ps; $H.Handles['Ev'] = $ps.BeginInvoke()
+    if ($tab) {
+        $H.Range = $null; $H.Max = 0
+        $H.RangeText = 'dane wczytane w zakładkach'
+        $H.ReqLoaded = $true
+        if ($nEv) { Start-HistoryWorker $H 'Ev' '' $null @($script:Ctx.Ev.All) $q }
+        if ($nLog) { Start-HistoryWorker $H 'Log' '' $null @($script:Ctx.Log.All) $q }
+        $msg = "Szukanie w danych zakładek: $($q.Label)..."
     }
-    if ($useLog) {
-        $mv = $(if ($q.Mode -eq 'Mac') { $q.Hex } else { $q.Norm })
-        $ps = [powershell]::Create()
-        [void]$ps.AddScript($script:LogLoader).AddArgument([string[]]$paths).AddArgument($mask).AddArgument($range[0]).AddArgument($range[1]).AddArgument($H.Max).AddArgument($q.Mode).AddArgument($mv).AddArgument([bool]$q.Partial)
-        $H.PS['Log'] = $ps; $H.Handles['Log'] = $ps.BeginInvoke()
+    else {
+        $H.Max = Get-MaxValue $u.hMax 20000
+        $H.Range = $range
+        $H.RangeText = Format-Range $range
+        # Access-Request / Challenge (kilkanaście na jedno logowanie EAP) wczytujemy tylko, gdy są
+        # pokazywane - inaczej zajmowałyby limit zdarzeń i starsza historia by przepadła.
+        $skipReq = -not [bool]$u.hReq.IsChecked
+        $H.ReqLoaded = -not ($useLog -and $skipReq)
+        if ($useEv) {
+            $dv = Get-HistoryDataValues $q
+            $H.Prefilter = [bool]$dv
+            Start-HistoryWorker $H 'Ev' ([string]$script:EvLoader) @($ui.txtServer.Text.Trim(), $range[0], $range[1], $H.Max, $dv) $null $q
+        }
+        if ($useLog) {
+            $mv = $(if ($q.Mode -eq 'Mac') { $q.Hex } else { $q.Norm })
+            Start-HistoryWorker $H 'Log' ([string]$script:LogLoader) @([string[]]$paths, $mask, $range[0], $range[1], $H.Max, $q.Mode, $mv, [bool]$q.Partial, $skipReq) $null $q
+        }
+        $msg = "Wczytywanie historii: $($q.Label), $($H.RangeText)$(if ($H.Prefilter) { ' (filtr MAC po stronie serwera)' } else { ' - skanowanie zakresu, może potrwać' })..."
     }
     $H.Busy = $true
     $H.LoadStarted = Get-Date
     $u.hLoad.IsEnabled = $false
     $u.hPb.Visibility = 'Visible'; $u.hPb.IsIndeterminate = $true
-    Set-HistoryStatus $H "Wczytywanie historii: $($q.Label), $($H.RangeText)$(if ($H.Prefilter) { ' (filtr MAC po stronie serwera)' } else { ' - skanowanie zakresu, może potrwać' })..." 'Warn'
+    Set-HistoryStatus $H $msg 'Warn'
     Set-HistoryState $H 'Wczytywanie...' 'Warn'
     $H.Timer.Start()
 }
@@ -2941,26 +3089,19 @@ function Complete-HistoryLoad($H) {
     if (-not $H -or -not $H.Busy) { return }
     foreach ($hnd in $H.Handles.Values) { if (-not $hnd.IsCompleted) { return } }
     $H.Timer.Stop()
-    $q = $H.Q
-    $ev = New-Object System.Collections.Generic.List[object]
-    $lg = New-Object System.Collections.Generic.List[object]
+    $evItems = $null; $logItems = $null; $logSum = $null
     $notes = New-Object System.Collections.Generic.List[string]
     $errors = New-Object System.Collections.Generic.List[string]
     $rawEv = 0
+    $hadEv = $H.PS.ContainsKey('Ev'); $hadLog = $H.PS.ContainsKey('Log')
     try {
         foreach ($src in @($H.PS.Keys)) {
             $ps = $H.PS[$src]
             try {
-                $result = $ps.EndInvoke($H.Handles[$src])
-                foreach ($r in $result) {
-                    if ($r.PSObject.Properties['IsSummary']) {
-                        if ($r.PSObject.Properties['Errors'] -and $r.Errors.Count) { foreach ($x in $r.Errors) { $errors.Add("pliki .log: $x") } }
-                        if ($r.PSObject.Properties['Files'] -and $r.Files -eq 0) { $notes.Add('żaden plik .log nie był modyfikowany w tym zakresie') }
-                        continue
-                    }
-                    if ($src -eq 'Ev') { $rawEv++ }
-                    if (Test-HistoryMatch $r $q) { if ($src -eq 'Ev') { $ev.Add($r) } else { $lg.Add($r) } }
-                }
+                $w = $null
+                foreach ($r in $ps.EndInvoke($H.Handles[$src])) { if ($r -and $r.PSObject.Properties['HistWorker']) { $w = $r } }
+                if (-not $w) { throw 'wczytywanie nie zwróciło wyniku' }
+                if ($src -eq 'Ev') { $evItems = $w.Items; $rawEv = $w.Raw } else { $logItems = $w.Items; $logSum = $w.Summary }
             }
             catch {
                 $msg = $_.Exception.Message
@@ -2969,17 +3110,38 @@ function Complete-HistoryLoad($H) {
             }
             finally { try { $ps.Dispose() } catch { } }
         }
-        if ($H.PS.ContainsKey('Ev') -and $H.Max -gt 0 -and $rawEv -ge $H.Max) {
-            $notes.Add($(if ($H.Prefilter) { "osiągnięto limit $($H.Max) zdarzeń - pokazano najnowsze" } else { "przeszukano tylko $($H.Max) najnowszych zdarzeń z dziennika - zwiększ MAKS. ZDARZEŃ albo zawęź zakres" }))
+        $nEv = [int]$evItems.Count; $nLog = [int]$logItems.Count
+        if ($logSum) {
+            if ($logSum.PSObject.Properties['Errors'] -and $logSum.Errors.Count) { foreach ($x in $logSum.Errors) { $errors.Add("pliki .log: $x") } }
+            if ($logSum.PSObject.Properties['Files'] -and $logSum.Files -eq 0) { $notes.Add('żaden plik .log nie był modyfikowany w tym zakresie') }
+            if ($logSum.PSObject.Properties['Dropped'] -and $logSum.Dropped -gt 0) {
+                $notes.Add("z plików .log pokazano $($H.Max) najnowszych pasujących wpisów, starszych ($($logSum.Dropped)) nie wczytano - zwiększ MAKS. ZDARZEŃ albo zawęź zakres")
+            }
         }
-        if ($H.PS.ContainsKey('Ev') -and $H.Prefilter -and $ev.Count -eq 0) {
-            $notes.Add('w dzienniku szukano dokładnego zapisu MAC (AA-BB-CC-DD-EE-FF, aabbccddeeff, aabb.ccdd.eeff...) - jeśli switch zapisuje go inaczej, zaznacz Dopasowanie częściowe')
+        $H.Items = Merge-HistoryItems $evItems $logItems
+        if (-not $H.TabMode) {
+            if ($hadEv) {
+                if ($H.Max -gt 0 -and $rawEv -ge $H.Max) {
+                    $notes.Add($(if ($H.Prefilter) { "osiągnięto limit $($H.Max) zdarzeń z dziennika - pokazano najnowsze" } else { "przeszukano tylko $($H.Max) najnowszych zdarzeń z dziennika - zwiększ MAKS. ZDARZEŃ albo zawęź zakres" }))
+                }
+                if ($H.Prefilter) {
+                    $logOnly = 0
+                    foreach ($it in $H.Items) { if ($it.Src -eq 'Log' -and $it.Kind -eq 'Resp') { $logOnly++ } }
+                    if ($nEv -eq 0) { $notes.Add('w dzienniku szukano dokładnego zapisu MAC (AA-BB-CC-DD-EE-FF, aabbccddeeff, aabb.ccdd.eeff, aabb-ccdd-eeff...) - jeśli switch zapisuje go inaczej, zaznacz Dopasowanie częściowe') }
+                    elseif ($logOnly -gt 0) { $notes.Add("$logOnly odpowiedzi (Accept / Reject) z plików .log nie ma w dzienniku Security - to inny serwer NPS albo switch zapisuje MAC inaczej (wtedy zaznacz Dopasowanie częściowe)") }
+                }
+            }
         }
-        $H.Items = Merge-HistoryItems $ev $lg $q
         Update-HistorySummary $H
         Update-HistoryView $H
-        $secs = [Math]::Round(((Get-Date) - $H.LoadStarted).TotalSeconds, 1)
-        $txt = "Wczytano w $secs s: dziennik Security $($ev.Count)$(if ($H.PS.ContainsKey('Ev')) { '' } else { ' (pominięty)' }), pliki .log $($lg.Count)$(if ($H.PS.ContainsKey('Log')) { '' } else { ' (pominięte)' })."
+        if ($H.TabMode) {
+            $txt = "Z danych zakładek: dziennik Security $nEv, pliki .log $nLog."
+            if ($H.Items.Count -eq 0) { $txt += ' Nic nie znaleziono - wybierz dłuższy zakres czasu, żeby przeszukać dziennik / logi.' }
+        }
+        else {
+            $secs = [Math]::Round(((Get-Date) - $H.LoadStarted).TotalSeconds, 1)
+            $txt = "Wczytano w $secs s: dziennik Security $nEv$(if ($hadEv) { '' } else { ' (pominięty)' }), pliki .log $nLog$(if ($hadLog) { '' } else { ' (pominięte)' })."
+        }
         if ($notes.Count) { $txt += ' Uwaga: ' + ($notes -join '; ') + '.' }
         if ($errors.Count) { $txt += ' BŁĘDY: ' + ($errors -join ' | ') }
         $lvl = $(if ($errors.Count) { 'Error' } elseif ($notes.Count -or $H.Items.Count -eq 0) { 'Warn' } else { 'OK' })
@@ -2992,6 +3154,8 @@ function Complete-HistoryLoad($H) {
         $H.Ui.hLoad.IsEnabled = $true
         $H.Ui.hPb.Visibility = 'Hidden'; $H.Ui.hPb.IsIndeterminate = $false
     }
+    # "Access-Request / Challenge" zaznaczone w trakcie wczytywania - doczytaj je
+    if (-not $H.ReqLoaded -and $H.Ui.hReq.IsChecked -and -not $errors.Count) { Start-HistoryLoad $H }
 }
 
 # Filtry widoku (wynik, żądania/accounting, zawężenie czasu) i przebudowa osi czasu.
@@ -3011,6 +3175,7 @@ function Update-HistoryView($H) {
         $base.Add($it)
     }
     $H.Base = $base
+    $H.BaseVer++
     $view = $base
     if ($H.ZoomFrom) {
         $view = New-Object System.Collections.Generic.List[object]
@@ -3021,8 +3186,8 @@ function Update-HistoryView($H) {
     $b = Build-HistoryRows $view $H.Q @{ Group = [bool]$u.hGroup.IsChecked; Markers = [bool]$u.hMarkers.IsChecked; Newest = [bool]$u.hNewest.IsChecked }
     $H.Rows = $b.Rows
     $u.hList.ItemsSource = $b.Rows
-    $ok = @($view | Where-Object { $_.Level -eq 'OK' }).Count
-    $er = @($view | Where-Object { $_.Level -eq 'Error' }).Count
+    $ok = 0; $er = 0
+    foreach ($it in $view) { if ($it.Level -eq 'OK') { $ok++ } elseif ($it.Level -eq 'Error') { $er++ } }
     $u.hCounts.Text = "W widoku: $($view.Count) / $($H.Items.Count)    Udzielono: $ok    Odmowa: $er    Zmian miejsca w sieci: $($b.Changes)"
     if ($H.ZoomFrom) {
         $u.hZoomText.Text = "Widok zawężony: $($H.ZoomFrom.ToString('yyyy-MM-dd HH:mm')) - $($H.ZoomTo.ToString('yyyy-MM-dd HH:mm'))"
@@ -3072,7 +3237,7 @@ function Update-HistorySummary($H) {
     $first = $items[0].Time; $last = $items[$items.Count - 1].Time
     $ok = 0; $err = 0
     $users = @{}; $macs = @{}; $comps = @{}; $clients = @{}; $ssids = @{}; $pols = @{}; $media = @{}
-    $lastErr = $null; $prevKey = $null; $changes = 0
+    $lastErr = $null; $loc = @{}; $changes = 0
     foreach ($it in $items) {
         if ($it.Level -eq 'OK') { $ok++ } elseif ($it.Level -eq 'Error') { $err++; $lastErr = $it }
         if ($it.UserDisp) { $users[$it.UserDisp] = 1 + [int]$users[$it.UserDisp] }
@@ -3082,7 +3247,7 @@ function Update-HistorySummary($H) {
         if ($it.Ssid) { $ssids[$it.Ssid] = 1 + [int]$ssids[$it.Ssid] }
         if ($it.E.Policy -and $it.E.Policy -ne '-') { $pols[[string]$it.E.Policy] = 1 + [int]$pols[[string]$it.E.Policy] }
         if ($it.Medium) { $media[$it.Medium] = 1 + [int]$media[$it.Medium] }
-        if ($it.LocKey) { if ($prevKey -and $prevKey -ne $it.LocKey) { $changes++ }; $prevKey = $it.LocKey }
+        if (Step-HistoryLocation $loc $it) { $changes++ }
     }
     $c = $u.hChips.Children
     [void]$c.Add((New-HistoryChip "Pierwsze: $($first.ToString('yyyy-MM-dd HH:mm:ss'))"))
@@ -3165,22 +3330,32 @@ function Update-HistoryStrip($H) {
     if (-not $items -or $items.Count -eq 0 -or $w -lt 40 -or $ht -lt 10) { return }
 
     $t0 = $items[0].Time; $t1 = $items[$items.Count - 1].Time
-    if ($H.Range -and $H.RangeText -ne 'dane wczytane w zakładkach') { $t0 = $H.Range[0]; $t1 = $H.Range[1] }
+    if ($H.Range -and -not $H.TabMode) { $t0 = $H.Range[0]; $t1 = $H.Range[1] }
     if (($t1 - $t0).TotalMinutes -lt 1) { $t0 = $t0.AddMinutes(-30); $t1 = $t1.AddMinutes(30) }
-    $n = [int][Math]::Max(10, [Math]::Min(180, [Math]::Floor($w / 6)))
+    # Stała liczba odcinków: liczniki liczymy raz na dane widoku, a zmiana rozmiaru okna
+    # tylko przerysowuje słupki (przy dziesiątkach tysięcy zdarzeń liczenie trwa).
+    $n = 120
     $span = ($t1 - $t0).Ticks / $n
-    $ok = New-Object int[] $n; $er = New-Object int[] $n; $ot = New-Object int[] $n
-    foreach ($it in $items) {
-        $i = [int][Math]::Floor(($it.Time - $t0).Ticks / $span)
-        if ($i -lt 0) { $i = 0 } elseif ($i -ge $n) { $i = $n - 1 }
-        if ($it.Level -eq 'OK') { $ok[$i]++ } elseif ($it.Level -eq 'Error') { $er[$i]++ } else { $ot[$i]++ }
+    $key = "$($H.BaseVer)|$($t0.Ticks)|$($t1.Ticks)"
+    if (-not $H.StripCache -or $H.StripCache.Key -ne $key) {
+        $ok = New-Object int[] $n; $er = New-Object int[] $n; $ot = New-Object int[] $n
+        $t0t = $t0.Ticks
+        foreach ($it in $items) {
+            $i = [int][Math]::Floor(($it.Time.Ticks - $t0t) / $span)
+            if ($i -lt 0) { $i = 0 } elseif ($i -ge $n) { $i = $n - 1 }
+            if ($it.Level -eq 'OK') { $ok[$i]++ } elseif ($it.Level -eq 'Error') { $er[$i]++ } else { $ot[$i]++ }
+        }
+        $H.StripCache = @{ Key = $key; Ok = $ok; Er = $er; Ot = $ot }
     }
+    $ok = $H.StripCache.Ok; $er = $H.StripCache.Er; $ot = $H.StripCache.Ot
     $mx = 1
     for ($i = 0; $i -lt $n; $i++) { $s = $ok[$i] + $er[$i] + $ot[$i]; if ($s -gt $mx) { $mx = $s } }
     $bw = $w / $n
     $buckets = New-Object System.Collections.Generic.List[object]
     for ($i = 0; $i -lt $n; $i++) {
-        $from = $t0.AddTicks([int64]($span * $i)); $to = $t0.AddTicks([int64]($span * ($i + 1)))
+        $from = $t0.AddTicks([int64]($span * $i))
+        # Ostatni odcinek włącznie z końcem - inaczej klik w niego pomijałby najnowsze zdarzenie
+        $to = $(if ($i -eq $n - 1) { $t1.AddTicks(1) } else { $t0.AddTicks([int64]($span * ($i + 1))) })
         $buckets.Add(@{ From = $from; To = $to })
         $tot = $ok[$i] + $er[$i] + $ot[$i]
         if (-not $tot) { continue }
