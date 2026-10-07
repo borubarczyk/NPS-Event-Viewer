@@ -3332,8 +3332,14 @@ function Open-HistoryDefault($e) {
 # Zwraca jeden obiekt: elementy, liczbę zdarzeń ze źródła i podsumowanie loadera plików .log.
 $script:HistWorker = {
     param($Engine, [string]$Loader, [object[]]$LoaderArgs, [object[]]$Objects, $Q, [string]$Src)
-    $source = $(if ($Loader) { @(& ([scriptblock]::Create($Loader)) @LoaderArgs) } else { $Objects })
-    $r = $Engine::BuildItems($source, $Q, $Src)
+    # Każdy błąd przerywa wczytywanie (EndInvoke go zgłosi), zamiast po cichu dać pustą historię.
+    # Bez $(...): wynik z jednym obiektem (jedno zdarzenie, samo podsumowanie loadera) nie może
+    # przestać być tablicą.
+    try {
+        if ($Loader) { $source = @(& ([scriptblock]::Create($Loader)) @LoaderArgs) } else { $source = $Objects }
+        $r = $Engine::BuildItems([object[]]$source, $Q, $Src)
+    }
+    catch { throw }
     [pscustomobject]@{ HistWorker = $true; Items = $r.Items; Raw = $r.Raw; Summary = $r.Summary }
 }
 

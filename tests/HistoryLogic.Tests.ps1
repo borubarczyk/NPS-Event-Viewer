@@ -191,6 +191,15 @@ $wt = Invoke-TestWorker '' $null @($evs) $q 'Ev'
 Check 'worker (tab data): items built in runspace' ($wt.HistWorker -and $wt.Raw -eq $evs.Count -and $wt.Items.Count -eq 7 -and $wt.Items[0].Src -eq 'Ev')
 $wl = Invoke-TestWorker ([string]$script:LogLoader) @(@($dir), 'IN*.log', $from, $to, 0, 'Mac', 'AABBCCDDEEFF', $false, $true) $null $q 'Log'
 Check 'worker (.log loader): items + summary' ($wl.Items.Count -eq 2 -and $wl.Summary.IsSummary -and $wl.Items[0].Src -eq 'Log')
+# Jeden obiekt ze źródła (jedno zdarzenie w zakładce, samo podsumowanie loadera) to nadal wynik
+$w1 = Invoke-TestWorker '' $null @($evs[0]) $q 'Ev'
+Check 'worker: single tab event' ($w1.Raw -eq 1 -and $w1.Items.Count -eq 1)
+$qn = New-HistoryQuery 'User' 'nobody' $false
+$ws = Invoke-TestWorker ([string]$script:LogLoader) @(@($dir), 'IN*.log', $from, $to, 0, 'User', 'nobody', $false) $null $qn 'Log'
+Check 'worker: summary-only loader result kept' ($ws.Summary.IsSummary -and $ws.Items.Count -eq 0 -and $ws.Raw -eq 0)
+$threw = $false
+try { [void](Invoke-TestWorker ([string]$script:LogLoader) @(@((Join-Path $LogDir 'brak-takiego-katalogu')), 'IN*.log', $from, $to, 0) $null $qn 'Log') } catch { $threw = $true }
+Check 'worker: loader error is reported' $threw
 
 # --- Wydajność (dziesiątki tysięcy zdarzeń; wynik informacyjnie) ---
 $big = New-Object System.Collections.Generic.List[object]
