@@ -78,6 +78,7 @@ Osobne okno z pełnym „łańcuchem zdarzeń” jednego **MAC**, **użytkownika
 ## Uwagi
 
 - **Wczytywanie w tle**: UI nie blokuje się podczas pobierania danych (także w oknie historii)
+- **Silnik osi czasu w C#**: dopasowanie, wiersze, podsumowanie i filtry okna historii działają w małym module C# (`Add-Type`, kompilowany raz na sesję w tle po starcie) - w Windows PowerShell 5.1 te same pętle w PowerShellu zamrażały okno na kilka sekund przy dziesiątkach tysięcy zdarzeń
 - **Test dymny**: `tests/Smoke-NpsViewer.ps1` (uruchamiany w GitHub Actions na Windows PowerShell 5.1) sprawdza logikę osi czasu (`tests/HistoryLogic.Tests.ps1`), otwiera okna na danych testowych, zamyka okno w trakcie wczytywania i mierzy czas przy 20000 zdarzeń
 - **Dane nie odblokowywane**: Pliki `.log` są otwierane bez blokowania — NPS może dalej pisać
 - **Audyt**: Jeśli brak zdarzeń, sprawdź audyt:

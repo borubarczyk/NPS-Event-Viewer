@@ -61,6 +61,7 @@ function Find-Clipping($Window, [string]$Name) {
 $fail = 0
 function Check($name, $cond) { if ($cond) { "ok   $name" } else { "FAIL $name"; $script:fail++ } }
 
+try {
 # --- Logika osi czasu (wspólne testy, także dla pwsh bez WPF) ---
 . (Join-Path $PSScriptRoot 'HistoryLogic.Tests.ps1') -LogDir (Join-Path $OutDir 'logs')
 $evs = $script:TestEvs; $lgs = $script:TestLgs
@@ -182,5 +183,12 @@ foreach ($hh in @($script:HistWins.Values)) { $hh.Win.Close() }
 Invoke-Pump 300
 Check 'windows cleaned up' ($script:HistWins.Count -eq 0)
 $win.Close()
+}
+catch {
+    # Pełna informacja o wyjątku (także .NET) - przy błędzie w Windows PowerShell 5.1 sam komunikat nie wystarcza
+    "EXCEPTION: $($_.Exception.ToString())"
+    "SCRIPT STACK: $($_.ScriptStackTrace)"
+    $fail++
+}
 "FAILED: $fail"
 if ($fail) { exit 1 }

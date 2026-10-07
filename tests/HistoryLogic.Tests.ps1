@@ -75,6 +75,7 @@ $kinds = ($b.Rows | ForEach-Object Kind) -join ','
 "KINDS: $kinds"
 Check 'rows sequence' ($kinds -eq 'Day,Event,Change,Event,Event,Gap,Change,Event,Event,Day,Gap,Who,Event')
 Check 'group x3' ($b.Rows[1].SubTime -like '×3*')
+Check 'engine text (Polish characters)' ($b.Rows[1].Detail -like 'użytkownik CONTOSO\jan  ·  *' -and $b.Rows[0].Title -eq 'wtorek, 6 października 2026')
 Check 'changes' ($b.Changes -eq 2)
 Check 'acct ip detail' (@($b.Rows | Where-Object { $_.Detail -like '*IP 10.0.5.17*' }).Count -eq 1)
 Check 'both source label' (@($b.Rows | Where-Object { $_.Detail -like '*Security + log*' }).Count -eq 1)
@@ -177,10 +178,9 @@ $it2 = New-HistoryItem ($c2 | Where-Object { $_.AcctTerminate } | Select-Object 
 Check 'history detail: session + cause' (($it2.Parts -join ' ') -like '*czas sesji 1 godz. 2 min*koniec sesji: Lost-Carrier*')
 
 # --- Runspace w tle (jak w oknie): funkcje przekazane tekstem, loader i dane z zakładek ---
-function Invoke-TestWorker([string]$Loader, $LoaderArgs, $Objects, $Q, [string]$Src) {
-    $ps = [powershell]::Create()
+function Invoke-TestWorker($Loader, $LoaderArgs, $Objects, $Q, $Src) {
+    $ps = New-HistoryWorker $Loader $LoaderArgs $Objects $Q $Src
     try {
-        [void]$ps.AddScript($script:HistWorker).AddArgument((Get-HistoryWorkerFunctions)).AddArgument($Loader).AddArgument($LoaderArgs).AddArgument($Objects).AddArgument($Q).AddArgument($Src)
         $r = @($ps.Invoke())
         if ($ps.Streams.Error.Count) { "WORKER ERROR: $($ps.Streams.Error[0])" }
         return $r[$r.Count - 1]

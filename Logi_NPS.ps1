@@ -2332,98 +2332,798 @@ $script:HistGapMinutes = 60
 $script:PlCulture      = [Globalization.CultureInfo]::GetCultureInfo('pl-PL')
 $script:MediumBg       = @{ 'Wi-Fi' = '#2E4A7D'; 'LAN' = '#24584A'; 'VPN' = '#55437A' }
 
-# --- Normalizacja identyfikatorów ----------------------------------------------------------
-# Użytkownik: bez domeny ("CONTOSO\jan", "jan@contoso.com" -> "jan"), małymi literami.
-# Konta komputerów ("host/pc01.contoso.com") zostają w całości - patrz Get-NormComputer.
-function Get-NormUser([string]$Value) {
-    if (-not $Value -or $Value -eq '-') { return '' }
-    $v = $Value.Trim().ToLowerInvariant()
-    $i = $v.LastIndexOf('\')
-    if ($i -ge 0) { $v = $v.Substring($i + 1) }
-    if (-not $v.StartsWith('host/') -and $v -match '^([^@]+)@') { $v = $Matches[1] }
-    return $v
+# --- Silnik osi czasu (C#) -----------------------------------------------------------------
+# Dopasowanie, elementy i wiersze osi czasu, podsumowanie, filtry widoku i pasek aktywności dla
+# dziesiątek tysięcy zdarzeń. W Windows PowerShell 5.1 te same pętle w PowerShellu trwały sekundy
+# (okna zamarzały przy każdym przełączeniu widoku), w C# - milisekundy. Kompilacja (Add-Type) raz
+# na sesję, w tle zaraz po starcie skryptu. Funkcje PowerShell poniżej to tylko nakładki.
+$script:HistEngineSource = @'
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Management.Automation;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace NpsHistory
+{
+    // Element osi czasu: jedno zdarzenie z dziennika Security albo z pliku .log (E = obiekt zdarzenia)
+    public class Item
+    {
+        public DateTime Time { get; set; }
+        public string Src { get; set; }
+        public bool Both { get; set; }
+        public string Kind { get; set; }
+        public string Level { get; set; }
+        public object E { get; set; }
+        public string Medium { get; set; }
+        public string PortKey { get; set; }
+        public string LocText { get; set; }
+        public string Ssid { get; set; }
+        public string Client { get; set; }
+        public string UserN { get; set; }
+        public string UserDisp { get; set; }
+        public string Computer { get; set; }
+        public string MacHex { get; set; }
+        public string Title { get; set; }
+        public List<string> Parts { get; set; }
+        public string Sig { get; set; }
+    }
+
+    // Wiersz osi czasu (ListBox): dzień, zdarzenie (z grupą powtórzeń) albo znacznik (zmiana sieci, przerwa, inny użytkownik)
+    public class Row
+    {
+        public Row(string kind, DateTime time)
+        {
+            Kind = kind; Time = time; First = time; Last = time;
+            TimeStr = ""; SubTime = ""; Color = "#8A90A2"; Title = ""; TitleColor = "#E8EAF0";
+            Medium = ""; MediumBg = "Transparent"; MediumVis = "Collapsed"; Location = ""; Detail = ""; Sig = ""; Info = "";
+            DayVis = kind == "Day" ? "Visible" : "Collapsed";
+            EventVis = kind == "Event" ? "Visible" : "Collapsed";
+            MarkerVis = (kind == "Change" || kind == "Gap" || kind == "Who") ? "Visible" : "Collapsed";
+            Items = new List<Item>();
+        }
+        public string Kind { get; set; }
+        public DateTime Time { get; set; }
+        public string TimeStr { get; set; }
+        public string SubTime { get; set; }
+        public string Color { get; set; }
+        public string Title { get; set; }
+        public string TitleColor { get; set; }
+        public string Medium { get; set; }
+        public string MediumBg { get; set; }
+        public string MediumVis { get; set; }
+        public string Location { get; set; }
+        public string Detail { get; set; }
+        public string DayVis { get; set; }
+        public string EventVis { get; set; }
+        public string MarkerVis { get; set; }
+        public List<Item> Items { get; set; }
+        public string Sig { get; set; }
+        public DateTime First { get; set; }
+        public DateTime Last { get; set; }
+        public string Info { get; set; }
+    }
+
+    // Ostatnie znane miejsce w sieci (porównanie tylko pól znanych po obu stronach)
+    internal class LocState
+    {
+        public Item It, Prev;
+        public string Medium = "", Ssid = "", Port = "";
+    }
+
+    public static class Engine
+    {
+        const RegexOptions Ci = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
+        static readonly Regex RxHexChars = new Regex(@"^[0-9A-Fa-f:\.\-\s]+$", Ci);
+        static readonly Regex RxNonHex = new Regex(@"[^0-9A-Fa-f]");
+        static readonly Regex RxSsid = new Regex(@"^(?:[0-9A-Fa-f]{2}[-:.]?){5}[0-9A-Fa-f]{2}[:;](.+)$", Ci);
+        // Typ portu w dzienniku Security jest w języku systemu ("Wireless - IEEE 802.11", "Drahtlos - IEEE 802.11",
+        // "Virtual"...), w plikach .log - numer (19/18 Wi-Fi, 15 LAN, 5 VPN)
+        static readonly Regex RxWifi = new Regex(@"802\.11|wireless|wi-?fi|bezprzew|drahtlos|sans fil|inal[aá]mbr|^1[89]$", Ci);
+        static readonly Regex RxLan = new Regex(@"ethernet|^15$", Ci);
+        static readonly Regex RxVpn = new Regex(@"virtu|wirtu|vpn|^5$", Ci);
+        static readonly Regex RxIpv4 = new Regex(@"^\d{1,3}(\.\d{1,3}){3}$");
+        static readonly Regex RxUpn = new Regex(@"^([^@]+)@", Ci);
+        static readonly Regex RxDigits = new Regex(@"^\d+$");
+        static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+
+        // --- dostęp do właściwości obiektów PowerShell ---
+        static PSObject P(object o) { return o == null ? null : PSObject.AsPSObject(o); }
+
+        static object Raw(PSObject p, string name)
+        {
+            if (p == null) return null;
+            PSPropertyInfo pi = p.Properties[name];
+            if (pi == null) return null;
+            object v;
+            try { v = pi.Value; } catch { return null; }
+            PSObject pv = v as PSObject;
+            return pv != null ? pv.BaseObject : v;
+        }
+
+        static string Str(PSObject p, string name)
+        {
+            object v = Raw(p, name);
+            if (v == null) return "";
+            return Convert.ToString(v, Inv) ?? "";
+        }
+
+        static string QS(IDictionary q, string key)
+        {
+            object v = q[key];
+            PSObject pv = v as PSObject;
+            if (pv != null) v = pv.BaseObject;
+            return v == null ? "" : (Convert.ToString(v, Inv) ?? "");
+        }
+
+        static bool Eq(string a, string b) { return string.Equals(a ?? "", b ?? "", StringComparison.OrdinalIgnoreCase); }
+
+        static Item AsItem(object o)
+        {
+            PSObject p = o as PSObject;
+            if (p != null) o = p.BaseObject;
+            return o as Item;
+        }
+
+        static string Lookup(IDictionary map, string key)
+        {
+            if (map == null || key == null) return null;
+            object v = map[key];
+            PSObject pv = v as PSObject;
+            if (pv != null) v = pv.BaseObject;
+            return v == null ? null : Convert.ToString(v, Inv);
+        }
+
+        // --- normalizacja identyfikatorów ---
+        public static string HexMac(string v)
+        {
+            if (string.IsNullOrEmpty(v) || !RxHexChars.IsMatch(v)) return "";
+            string h = RxNonHex.Replace(v, "").ToUpperInvariant();
+            return h.Length >= 4 ? h : "";
+        }
+
+        // Użytkownik: bez domeny ("CONTOSO\jan", "jan@contoso.com" -> "jan"), małymi literami; host/... zostaje
+        public static string NormUser(string v)
+        {
+            if (string.IsNullOrEmpty(v) || v == "-") return "";
+            v = v.Trim().ToLowerInvariant();
+            int i = v.LastIndexOf('\\');
+            if (i >= 0) v = v.Substring(i + 1);
+            if (!v.StartsWith("host/", StringComparison.Ordinal))
+            {
+                Match m = RxUpn.Match(v);
+                if (m.Success) v = m.Groups[1].Value;
+            }
+            return v;
+        }
+
+        // Komputer: "host/PC01.contoso.com", "CONTOSO\PC01$", "PC01.contoso.com" -> "pc01"
+        public static string NormComputer(string v)
+        {
+            if (string.IsNullOrEmpty(v) || v == "-") return "";
+            v = v.Trim().ToLowerInvariant();
+            if (v.StartsWith("host/", StringComparison.Ordinal)) v = v.Substring(5);
+            int i = v.LastIndexOf('\\');
+            if (i >= 0) v = v.Substring(i + 1);
+            v = v.TrimEnd('$');
+            int j = v.IndexOf('.');
+            if (j > 0) v = v.Substring(0, j);
+            return v;
+        }
+
+        public static bool IsComputerAccount(string v)
+        {
+            if (string.IsNullOrEmpty(v)) return false;
+            string t = v.Trim();
+            return t.StartsWith("host/", StringComparison.OrdinalIgnoreCase) || t.EndsWith("$", StringComparison.Ordinal);
+        }
+
+        public static string FormatMac(string hex)
+        {
+            if (hex == null || hex.Length != 12) return hex ?? "";
+            StringBuilder sb = new StringBuilder(17);
+            for (int i = 0; i < 12; i += 2) { if (i > 0) sb.Append('-'); sb.Append(hex, i, 2); }
+            return sb.ToString();
+        }
+
+        public static string FormatSpan(TimeSpan s)
+        {
+            if (s.TotalDays >= 1) return string.Format("{0} d {1} godz.", (int)Math.Floor(s.TotalDays), s.Hours);
+            if (s.TotalHours >= 1) return string.Format("{0} godz. {1} min", (int)Math.Floor(s.TotalHours), s.Minutes);
+            if (s.TotalMinutes >= 1) return string.Format("{0} min", (int)Math.Floor(s.TotalMinutes));
+            return string.Format("{0} s", (int)Math.Floor(s.TotalSeconds));
+        }
+
+        // --- pola zdarzenia ---
+        static string UserMacP(PSObject p) { string h = HexMac(Str(p, "User")); return h.Length == 12 ? h : ""; }
+        public static string UserMac(object e) { return UserMacP(P(e)); }
+
+        // Tylko obiekty z plików .log mają nazwę pliku
+        static string SrcP(PSObject p) { return Raw(p, "File") != null ? "Log" : "Ev"; }
+        public static string EventSrc(object e) { return SrcP(P(e)); }
+
+        static string UserDisplayP(PSObject p)
+        {
+            string u = Str(p, "User");
+            if (u == "" || u == "-") return "";
+            string d = Str(p, "Domain");
+            if (d != "" && d != "-" && u.IndexOf('\\') < 0 && u.IndexOf('@') < 0 && SrcP(p) == "Ev") return d + "\\" + u;
+            return u;
+        }
+        public static string EventUserDisplay(object e) { return UserDisplayP(P(e)); }
+
+        // Komputer zdarzenia: nazwa maszyny z dziennika Security albo konto komputera (host/..., NAZWA$)
+        // w nazwie użytkownika. W plikach .log "Computer-Name" to serwer NPS, nie klient.
+        static string ComputerP(PSObject p)
+        {
+            if (SrcP(p) == "Ev")
+            {
+                string m = Str(p, "Machine");
+                if (m != "" && m != "-") return NormComputer(m);
+            }
+            foreach (string f in new string[] { "User", "UserFQ" })
+            {
+                string u = Str(p, f);
+                if (IsComputerAccount(u)) return NormComputer(u);
+            }
+            return "";
+        }
+        public static string EventComputer(object e) { return ComputerP(P(e)); }
+
+        static string SsidP(PSObject p)
+        {
+            Match m = RxSsid.Match(Str(p, "CalledStation"));
+            return m.Success ? m.Groups[1].Value.Trim() : "";
+        }
+        public static string EventSsid(object e) { return SsidP(P(e)); }
+
+        static string MediumP(PSObject p)
+        {
+            string t = Str(p, "NasPortType");
+            if (RxWifi.IsMatch(t)) return "Wi-Fi";
+            if (RxLan.IsMatch(t)) return "LAN";
+            if (RxVpn.IsMatch(t)) return "VPN";
+            if (SsidP(p) != "") return "Wi-Fi";
+            if (RxIpv4.IsMatch(Str(p, "CallingStation"))) return "VPN";
+            return "";
+        }
+        public static string EventMedium(object e) { return MediumP(P(e)); }
+
+        static string ClientNameP(PSObject p)
+        {
+            foreach (string f in new string[] { "Client", "ClientIp", "NasIp", "NasId" })
+            {
+                string v = Str(p, f);
+                if (v != "" && v != "-") return v;
+            }
+            return "";
+        }
+        public static string EventClientName(object e) { return ClientNameP(P(e)); }
+
+        // --- dopasowanie do zapytania ($Q z New-HistoryQuery: Mode, Hex, Norm, Partial) ---
+        // Najpierw tanie odrzucenie po surowym tekście, potem dokładne porównanie po normalizacji.
+        static bool MatchP(PSObject p, IDictionary q)
+        {
+            string mode = QS(q, "Mode");
+            bool partial = LanguagePrimitives.IsTrue(q["Partial"]);
+            if (mode == "Mac")
+            {
+                // MAC tylko z pełnych 12 cyfr: przy VPN Calling-Station-Id to adres IP (loadery nie liczą
+                // z niego MacHex), a nazwa użytkownika "abc.def" też "wygląda" na szesnastkową.
+                string hex = QS(q, "Hex");
+                string mh = Str(p, "MacHex");
+                bool inUser = Str(p, "UserHex").Contains(hex);
+                if (!(inUser || mh.Contains(hex))) return false;
+                string userHex = inUser ? UserMacP(p) : "";
+                string macHex = mh.Length == 12 ? mh : "";
+                if (partial) return (macHex != "" && macHex.Contains(hex)) || (userHex != "" && userHex.Contains(hex));
+                return Eq(macHex, hex) || Eq(userHex, hex);
+            }
+            string norm = QS(q, "Norm");
+            if (norm == "") return false;
+            if (mode == "User")
+            {
+                foreach (string f in new string[] { "User", "UserFQ", "Sam" })
+                {
+                    string s = Str(p, f);
+                    if (s == "" || s.IndexOf(norm, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    string n = NormUser(s);
+                    if (n == "") continue;
+                    if (partial ? n.Contains(norm) : Eq(n, norm)) return true;
+                }
+                return false;
+            }
+            if (mode == "Computer")
+            {
+                // Nazwa maszyny tylko z dziennika Security, poza tym konta komputerów w nazwie użytkownika
+                bool isEv = SrcP(p) == "Ev";
+                string[] fields = new string[] { "Machine", "User", "UserFQ", "Sam" };
+                for (int i = 0; i < fields.Length; i++)
+                {
+                    string s = Str(p, fields[i]);
+                    if (s == "" || s.IndexOf(norm, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                    if (i == 0) { if (!isEv || s == "-") continue; }
+                    else if (!IsComputerAccount(s)) continue;
+                    string n = NormComputer(s);
+                    if (n == "") continue;
+                    if (partial ? n.Contains(norm) : Eq(n, norm)) return true;
+                }
+                return false;
+            }
+            return false;
+        }
+        public static bool Match(object e, IDictionary q) { return e != null && MatchP(P(e), q); }
+
+        // --- element osi czasu ---
+        static Item NewItemP(PSObject p, string src, IDictionary q)
+        {
+            string mode = QS(q, "Mode");
+            string medium = MediumP(p);
+            string client = ClientNameP(p);
+            string ssid = SsidP(p);
+            // Port do porównań: NAS-Port (numer) jest w obu źródłach. NAS-Port-Id (nazwa, np.
+            // GigabitEthernet1/0/12) jest tylko w plikach .log - służy wyłącznie do opisu.
+            string portKey = Str(p, "NasPort"); if (portKey == "-") portKey = "";
+            string portTxt = portKey;
+            string portId = Str(p, "NasPortId"); if (portId != "") portTxt = portId;
+            string locText;
+            if (medium == "Wi-Fi")
+            {
+                portKey = "";
+                locText = (ssid != "" && client != "") ? "SSID " + ssid + " · " + client : (ssid != "" ? "SSID " + ssid : client);
+            }
+            else if (medium == "VPN")
+            {
+                // NAS-Port przy VPN to numer tunelu / sesji - zmienia się przy każdym połączeniu
+                portKey = "";
+                locText = client;
+            }
+            else
+            {
+                locText = (portTxt != "" && client != "") ? client + " · port " + portTxt : (portTxt != "" ? "port " + portTxt : client);
+            }
+
+            string kind = Str(p, "Kind"); if (kind == "") kind = "Resp";
+            string level = Str(p, "Level");
+            string result = Str(p, "Result");
+            string rc = Str(p, "ReasonCode");
+            string userDisp = UserDisplayP(p);
+            string userN = NormUser(Str(p, "User"));
+            string comp = ComputerP(p);
+            string macHex = Str(p, "MacHex"); if (macHex.Length != 12) macHex = "";
+            string calling = Str(p, "CallingStation");
+
+            List<string> parts = new List<string>();
+            if (mode != "User" && userDisp != "") parts.Add("użytkownik " + userDisp);
+            if (mode != "Mac" && calling != "" && calling != "-") parts.Add(macHex != "" ? "MAC " + calling : "z adresu " + calling);
+            if (mode != "Computer" && comp != "" && !IsComputerAccount(userDisp)) parts.Add("komputer " + comp.ToUpperInvariant());
+            string policy = Str(p, "Policy");
+            if (policy != "" && policy != "-") parts.Add("zasada: " + policy);
+            string at = Str(p, "AuthType"); if (at == "-") at = "";
+            string et = Str(p, "EapType"); if (et == "-") et = "";
+            string auth = (at != "" && et != "" && !Eq(at, et)) ? at + " / " + et : (at != "" ? at : et);
+            if (auth != "") parts.Add(auth);
+            string ip = Str(p, "FramedIp");
+            if (ip != "") parts.Add("IP " + ip);
+            string st = Str(p, "SessionTime");
+            if (st != "" && RxDigits.IsMatch(st)) parts.Add("czas sesji " + FormatSpan(TimeSpan.FromSeconds(double.Parse(st, Inv))));
+            string term = Str(p, "AcctTerminate");
+            if (term != "") parts.Add("koniec sesji: " + term);
+
+            string title = result;
+            if (!Eq(level, "OK") && rc != "" && rc != "0" && rc != "-")
+            {
+                string r = Str(p, "Reason");
+                if (r.Length > 90) r = r.Substring(0, 90) + "...";
+                title += (r != "" && r != "-") ? " - " + r + " (kod " + rc + ")" : " (kod " + rc + ")";
+            }
+
+            object t = Raw(p, "Time");
+            Item it = new Item();
+            it.Time = t is DateTime ? (DateTime)t : (t == null ? DateTime.MinValue : Convert.ToDateTime(t, Inv));
+            it.Src = src; it.Both = false; it.Kind = kind; it.Level = level; it.E = p;
+            it.Medium = medium; it.PortKey = portKey; it.LocText = locText; it.Ssid = ssid; it.Client = client;
+            it.UserN = userN; it.UserDisp = userDisp; it.Computer = comp; it.MacHex = macHex; it.Title = title; it.Parts = parts;
+            it.Sig = string.Join("|", new string[] { level, result, rc, client, medium, ssid, portKey, userN, macHex, kind });
+            return it;
+        }
+        public static Item NewItem(object e, string src, IDictionary q) { return NewItemP(P(e), src, q); }
+
+        // Dopasowanie i budowa elementów dla całego wyniku loadera / danych z zakładki (runspace w tle).
+        // Obiekt z IsSummary to podsumowanie loadera plików .log.
+        public static Hashtable BuildItems(IEnumerable source, IDictionary q, string src)
+        {
+            List<Item> items = new List<Item>();
+            object summary = null;
+            int raw = 0;
+            if (source != null)
+            {
+                foreach (object o in source)
+                {
+                    if (o == null) continue;
+                    PSObject p = PSObject.AsPSObject(o);
+                    if (p.Properties["IsSummary"] != null) { summary = o; continue; }
+                    raw++;
+                    if (MatchP(p, q)) items.Add(NewItemP(p, src, q));
+                }
+            }
+            Hashtable r = new Hashtable(StringComparer.OrdinalIgnoreCase);
+            r["Items"] = items; r["Raw"] = raw; r["Summary"] = summary;
+            return r;
+        }
+
+        // Łączy elementy z dziennika Security i z plików .log. Odpowiedź (Accept/Reject) z logu, która ma
+        // odpowiednik w dzienniku Security (ten sam wynik i urządzenie, do 2 s różnicy), nie jest pokazywana
+        // drugi raz - zdarzenie z Security dostaje oznaczenie "Security + log". Wynik rosnąco po czasie;
+        // przy równym czasie późniejsza pozycja wejścia pierwsza (loadery podają najnowsze najpierw).
+        public static List<Item> Merge(IEnumerable evItems, IEnumerable logItems)
+        {
+            List<Item> all = new List<Item>();
+            Dictionary<string, List<Item>> index = new Dictionary<string, List<Item>>(StringComparer.OrdinalIgnoreCase);
+            if (evItems != null)
+            {
+                foreach (object o in evItems)
+                {
+                    Item it = AsItem(o); if (it == null) continue;
+                    all.Add(it);
+                    string k = it.Level + "|" + (it.Time.Ticks / TimeSpan.TicksPerSecond).ToString(Inv);
+                    List<Item> l;
+                    if (!index.TryGetValue(k, out l)) { l = new List<Item>(); index[k] = l; }
+                    l.Add(it);
+                }
+            }
+            if (logItems != null)
+            {
+                foreach (object o in logItems)
+                {
+                    Item it = AsItem(o); if (it == null) continue;
+                    if (Eq(it.Kind, "Resp") && index.Count > 0)
+                    {
+                        long sec = it.Time.Ticks / TimeSpan.TicksPerSecond;
+                        Item dup = null;
+                        for (long d = -2; d <= 2 && dup == null; d++)
+                        {
+                            List<Item> l;
+                            if (!index.TryGetValue(it.Level + "|" + (sec + d).ToString(Inv), out l)) continue;
+                            foreach (Item c in l)
+                            {
+                                if (c.Both) continue;
+                                bool same = (c.MacHex != "" && it.MacHex != "") ? Eq(c.MacHex, it.MacHex) : (c.UserN != "" && Eq(c.UserN, it.UserN));
+                                if (same) { dup = c; break; }
+                            }
+                        }
+                        if (dup != null) { dup.Both = true; continue; }
+                    }
+                    all.Add(it);
+                }
+            }
+            int n = all.Count;
+            int[] idx = new int[n];
+            for (int i = 0; i < n; i++) idx[i] = i;
+            Array.Sort(idx, delegate (int a, int b)
+            {
+                int c = all[a].Time.CompareTo(all[b].Time);
+                return c != 0 ? c : b.CompareTo(a);
+            });
+            List<Item> sorted = new List<Item>(n);
+            foreach (int i in idx) sorted.Add(all[i]);
+            return sorted;
+        }
+
+        // Czy element jest w innym miejscu sieci niż ostatnie znane? Porównujemy tylko pola znane po obu
+        // stronach: wpis accounting bez typu portu albo zdarzenie bez numeru portu nie oznacza zmiany.
+        static bool StepLocation(LocState s, Item it)
+        {
+            if (it.Client == "") return false;
+            if (s.It == null) { s.It = it; s.Medium = it.Medium; s.Ssid = it.Ssid; s.Port = it.PortKey; return false; }
+            bool chg = !Eq(s.It.Client, it.Client)
+                || (s.Medium != "" && it.Medium != "" && !Eq(s.Medium, it.Medium))
+                || (s.Ssid != "" && it.Ssid != "" && !Eq(s.Ssid, it.Ssid))
+                || (s.Port != "" && it.PortKey != "" && !Eq(s.Port, it.PortKey));
+            if (chg)
+            {
+                s.Prev = s.It; s.It = it; s.Medium = it.Medium; s.Ssid = it.Ssid; s.Port = it.PortKey;
+                return true;
+            }
+            if (s.Medium == "" && it.Medium != "") { s.Medium = it.Medium; s.It = it; }
+            if (s.Ssid == "") s.Ssid = it.Ssid;
+            if (s.Port == "" && s.Medium != "Wi-Fi" && s.Medium != "VPN") s.Port = it.PortKey;
+            return false;
+        }
+
+        static string FormatLocation(Item it)
+        {
+            string l = it.LocText != "" ? it.LocText : "(nieznane miejsce)";
+            return it.Medium != "" ? it.Medium + " · " + l : l;
+        }
+
+        // Wiersze osi czasu z elementów posortowanych rosnąco po czasie: zdarzenia (z grupowaniem
+        // powtórzeń), znaczniki zmian sieci / urządzenia / użytkownika, przerwy i nagłówki dni.
+        public static Hashtable BuildRows(IEnumerable items, IDictionary q, bool group, bool markers, bool newest,
+            int gapMinutes, IDictionary colors, IDictionary mediumBg, CultureInfo dayCulture)
+        {
+            string mode = QS(q, "Mode");
+            List<Item> list = new List<Item>();
+            if (items != null) foreach (object o in items) { Item it = AsItem(o); if (it != null) list.Add(it); }
+            List<Row> seq = new List<Row>();
+            TimeSpan gap = TimeSpan.FromMinutes(gapMinutes);
+            Item prev = null;
+            LocState loc = new LocState();
+            string lastWho = null, lastWhoDisp = null;
+            Row cur = null;
+            int changes = 0;
+            string whatTxt = mode == "User" ? "użytkownika" : (mode == "Computer" ? "komputera" : "urządzenia");
+            const string fmt = "yyyy-MM-dd HH:mm:ss";
+
+            foreach (Item it in list)
+            {
+                if (prev != null)
+                {
+                    TimeSpan dt = it.Time - prev.Time;
+                    if (markers && dt > gap)
+                    {
+                        Row m = new Row("Gap", it.Time);
+                        m.Title = "brak zdarzeń przez " + FormatSpan(dt);
+                        m.TitleColor = "#8A90A2";
+                        m.Info = "Od " + prev.Time.ToString(fmt) + " do " + it.Time.ToString(fmt) + " nie było zdarzeń tego " + whatTxt +
+                            ". Urządzenie mogło być wyłączone, odłączone albo po prostu nie uwierzytelniało się ponownie (zależy od ustawień reauth na switchu / AP).";
+                        seq.Add(m);
+                        cur = null;
+                    }
+                }
+
+                // Zmiana miejsca w sieci (LAN <-> Wi-Fi, inny switch / port / SSID)
+                if (StepLocation(loc, it))
+                {
+                    changes++;
+                    if (markers)
+                    {
+                        Item from = loc.Prev;
+                        Row m = new Row("Change", it.Time);
+                        string kindTxt = (from.Medium != "" && it.Medium != "" && !Eq(from.Medium, it.Medium)) ? "zmiana sieci " + from.Medium + " → " + it.Medium : "zmiana miejsca w sieci";
+                        m.Title = kindTxt + ":  " + FormatLocation(from) + "  →  " + FormatLocation(it);
+                        m.TitleColor = "#93C5FD";
+                        m.MediumBg = "#1F2A40";
+                        m.Info = "Poprzednie miejsce (" + from.Time.ToString(fmt) + "): " + FormatLocation(from) + "\nNastępne (" + it.Time.ToString(fmt) + "): " + FormatLocation(it);
+                        seq.Add(m);
+                        cur = null;
+                    }
+                }
+
+                // Inny użytkownik na tym samym urządzeniu (tryb MAC / komputer) albo inne urządzenie tego samego
+                // użytkownika (tryb użytkownik; MacHex jest pusty, gdy to nie MAC - np. VPN)
+                string who = mode == "User" ? it.MacHex : it.UserN;
+                if (who != "")
+                {
+                    if (markers && lastWho != null && !Eq(lastWho, who))
+                    {
+                        Row m = new Row("Who", it.Time);
+                        m.Title = mode == "User" ? "inne urządzenie:  " + FormatMac(lastWho) + "  →  " + FormatMac(who) : "inny użytkownik:  " + lastWhoDisp + "  →  " + it.UserDisp;
+                        m.TitleColor = "#FCD34D";
+                        m.MediumBg = "#3A3320";
+                        m.Info = m.Title;
+                        seq.Add(m);
+                        cur = null;
+                    }
+                    lastWho = who;
+                    lastWhoDisp = it.UserDisp != "" ? it.UserDisp : who;
+                }
+
+                if (group && cur != null && Eq(cur.Sig, it.Sig) && cur.Last.Date == it.Time.Date && (it.Time - cur.Last) <= gap)
+                {
+                    cur.Items.Add(it);
+                    cur.Last = it.Time;
+                    prev = it;
+                    continue;
+                }
+
+                Row r = new Row("Event", it.Time);
+                r.Sig = it.Sig;
+                r.Items.Add(it);
+                r.Color = Lookup(colors, it.Level) ?? "#8A90A2";
+                r.Title = it.Title;
+                r.TitleColor = Eq(it.Level, "Error") ? "#F87171" : (Eq(it.Level, "Warn") ? "#FBBF24" : (Eq(it.Level, "Info") ? "#C9CDD8" : "#E8EAF0"));
+                if (it.Medium != "") { r.Medium = it.Medium; r.MediumVis = "Visible"; r.MediumBg = Lookup(mediumBg, it.Medium) ?? "Transparent"; }
+                r.Location = it.LocText;
+                seq.Add(r);
+                cur = r;
+                prev = it;
+            }
+
+            // Uzupełnienie wierszy (czas, licznik powtórzeń, źródło)
+            foreach (Row r in seq)
+            {
+                if (r.Kind != "Event") continue;
+                int n = r.Items.Count;
+                Item last = r.Items[n - 1];
+                r.TimeStr = (newest ? r.Last : r.First).ToString("HH:mm:ss");
+                if (n > 1) r.SubTime = "×" + n.ToString(Inv) + " · " + (newest ? "od " + r.First.ToString("HH:mm:ss") : "do " + r.Last.ToString("HH:mm:ss"));
+                bool both = false, hasEv = false, hasLog = false;
+                foreach (Item x in r.Items) { if (x.Both) both = true; if (x.Src == "Log") hasLog = true; else hasEv = true; }
+                string srcTxt = (both || (hasEv && hasLog)) ? "Security + log" : (hasLog ? "log .log" : "Security");
+                r.Detail = last.Parts.Count > 0 ? string.Join("  ·  ", last.Parts.ToArray()) + "  ·  " + srcTxt : srcTxt;
+            }
+
+            if (newest) seq.Reverse();
+
+            // Nagłówki dni (z liczbą zdarzeń i odmów danego dnia)
+            Dictionary<DateTime, int[]> dayStats = new Dictionary<DateTime, int[]>();
+            foreach (Item it in list)
+            {
+                int[] st;
+                if (!dayStats.TryGetValue(it.Time.Date, out st)) { st = new int[2]; dayStats[it.Time.Date] = st; }
+                st[0]++;
+                if (Eq(it.Level, "Error")) st[1]++;
+            }
+            List<Row> rows = new List<Row>(seq.Count + 16);
+            DateTime day = DateTime.MinValue;
+            bool first = true;
+            foreach (Row r in seq)
+            {
+                if (first || day != r.Time.Date)
+                {
+                    first = false;
+                    day = r.Time.Date;
+                    Row hd = new Row("Day", day);
+                    hd.Title = day.ToString("dddd, d MMMM yyyy", dayCulture ?? CultureInfo.CurrentCulture);
+                    int[] st;
+                    if (dayStats.TryGetValue(day, out st)) hd.Detail = "zdarzeń: " + st[0].ToString(Inv) + (st[1] > 0 ? "  ·  odmów: " + st[1].ToString(Inv) : "");
+                    rows.Add(hd);
+                }
+                rows.Add(r);
+            }
+            Hashtable res = new Hashtable(StringComparer.OrdinalIgnoreCase);
+            res["Rows"] = rows; res["Changes"] = changes;
+            return res;
+        }
+
+        // Filtry widoku (wynik, żądania / accounting, zawężenie czasu): Base = po filtrach, View = Base w zawężeniu
+        public static Hashtable Filter(IEnumerable items, int result, bool showReq, bool showAcct, object zoomFrom, object zoomTo)
+        {
+            PSObject zf = zoomFrom as PSObject; if (zf != null) zoomFrom = zf.BaseObject;
+            PSObject zt = zoomTo as PSObject; if (zt != null) zoomTo = zt.BaseObject;
+            bool zoom = zoomFrom is DateTime && zoomTo is DateTime;
+            DateTime from = zoom ? (DateTime)zoomFrom : DateTime.MinValue, to = zoom ? (DateTime)zoomTo : DateTime.MaxValue;
+            List<Item> bas = new List<Item>(), view = zoom ? new List<Item>() : bas;
+            int ok = 0, er = 0;
+            if (items != null)
+            {
+                foreach (object o in items)
+                {
+                    Item it = AsItem(o); if (it == null) continue;
+                    if (!showReq && Eq(it.Kind, "Req")) continue;
+                    if (!showAcct && Eq(it.Kind, "Acct")) continue;
+                    bool isOk = Eq(it.Level, "OK"), isErr = Eq(it.Level, "Error");
+                    if (result == 1 && !isOk) continue;
+                    if (result == 2 && !isErr) continue;
+                    if (result == 3 && (isOk || isErr)) continue;
+                    bas.Add(it);
+                    if (zoom) { if (it.Time >= from && it.Time < to) view.Add(it); else continue; }
+                    if (isOk) ok++; else if (isErr) er++;
+                }
+            }
+            Hashtable res = new Hashtable(StringComparer.OrdinalIgnoreCase);
+            res["Base"] = bas; res["View"] = view; res["Ok"] = ok; res["Er"] = er;
+            return res;
+        }
+
+        static void Count(Hashtable map, string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            object v = map[key];
+            map[key] = (v == null ? 0 : (int)v) + 1;
+        }
+
+        // Podsumowanie: pierwsze / ostatnie, udzielono / odmowa, zmiany miejsca, powiązani użytkownicy,
+        // urządzenia, komputery, switche / AP, SSID, zasady i udział LAN / Wi-Fi / VPN
+        public static Hashtable Summarize(IEnumerable items)
+        {
+            Hashtable users = new Hashtable(StringComparer.OrdinalIgnoreCase), macs = new Hashtable(StringComparer.OrdinalIgnoreCase),
+                comps = new Hashtable(StringComparer.OrdinalIgnoreCase), clients = new Hashtable(StringComparer.OrdinalIgnoreCase),
+                ssids = new Hashtable(StringComparer.OrdinalIgnoreCase), pols = new Hashtable(StringComparer.OrdinalIgnoreCase),
+                media = new Hashtable(StringComparer.OrdinalIgnoreCase);
+            int ok = 0, err = 0, changes = 0, count = 0, logOnly = 0;
+            Item lastErr = null, firstIt = null, lastIt = null;
+            LocState loc = new LocState();
+            if (items != null)
+            {
+                foreach (object o in items)
+                {
+                    Item it = AsItem(o); if (it == null) continue;
+                    count++;
+                    if (firstIt == null) firstIt = it;
+                    lastIt = it;
+                    if (Eq(it.Level, "OK")) ok++; else if (Eq(it.Level, "Error")) { err++; lastErr = it; }
+                    Count(users, it.UserDisp);
+                    if (it.MacHex.Length == 12) Count(macs, it.MacHex);
+                    Count(comps, it.Computer);
+                    Count(clients, it.Client);
+                    Count(ssids, it.Ssid);
+                    string pol = Str(P(it.E), "Policy");
+                    if (pol != "-") Count(pols, pol);
+                    Count(media, it.Medium);
+                    if (StepLocation(loc, it)) changes++;
+                    if (it.Src == "Log" && Eq(it.Kind, "Resp")) logOnly++;   // odpowiedź tylko z pliku .log (bez pary w Security)
+                }
+            }
+            Hashtable res = new Hashtable(StringComparer.OrdinalIgnoreCase);
+            res["Count"] = count; res["Ok"] = ok; res["Err"] = err; res["Changes"] = changes; res["LastErr"] = lastErr; res["LogOnly"] = logOnly;
+            res["First"] = firstIt == null ? (object)null : firstIt.Time; res["Last"] = lastIt == null ? (object)null : lastIt.Time;
+            res["Users"] = users; res["Macs"] = macs; res["Comps"] = comps; res["Clients"] = clients;
+            res["Ssids"] = ssids; res["Pols"] = pols; res["Media"] = media;
+            return res;
+        }
+
+        // Liczniki paska aktywności w n równych odcinkach [t0, t1] (zdarzenie z końca zakresu - w ostatnim)
+        public static Hashtable Buckets(IEnumerable items, DateTime t0, DateTime t1, int n)
+        {
+            int[] ok = new int[n], er = new int[n], ot = new int[n];
+            double span = (double)(t1 - t0).Ticks / n;
+            if (items != null && span > 0)
+            {
+                foreach (object o in items)
+                {
+                    Item it = AsItem(o); if (it == null) continue;
+                    int i = (int)Math.Floor((it.Time.Ticks - t0.Ticks) / span);
+                    if (i < 0) i = 0; else if (i >= n) i = n - 1;
+                    if (Eq(it.Level, "OK")) ok[i]++; else if (Eq(it.Level, "Error")) er[i]++; else ot[i]++;
+                }
+            }
+            Hashtable res = new Hashtable(StringComparer.OrdinalIgnoreCase);
+            res["Ok"] = ok; res["Er"] = er; res["Ot"] = ot;
+            return res;
+        }
+    }
+}
+'@
+
+$script:HistEngine = $null
+$script:HistEngineBuild = $null
+if (-not ('NpsHistory.Engine' -as [type])) {
+    $hb = [powershell]::Create()
+    [void]$hb.AddScript('param($Source) Add-Type -TypeDefinition $Source -PassThru')
+    [void]$hb.AddArgument($script:HistEngineSource)
+    $script:HistEngineBuild = @{ PS = $hb; Handle = $hb.BeginInvoke() }
 }
 
+function Get-HistoryEngine {
+    if ($script:HistEngine) { return $script:HistEngine }
+    $t = $null
+    $b = $script:HistEngineBuild
+    if ($b) {
+        # kompilacja w tle jeszcze trwa albo się skończyła - czekamy na nią zamiast kompilować drugi raz
+        $script:HistEngineBuild = $null
+        try { foreach ($x in $b.PS.EndInvoke($b.Handle)) { if ($x -and $x.FullName -eq 'NpsHistory.Engine') { $t = [type]$x } } } catch { }
+        try { $b.PS.Dispose() } catch { }
+    }
+    if (-not $t) { $t = 'NpsHistory.Engine' -as [type] }
+    if (-not $t) { $t = @(Add-Type -TypeDefinition $script:HistEngineSource -PassThru | Where-Object { $_.FullName -eq 'NpsHistory.Engine' })[0] }
+    $script:HistEngine = $t
+    return $t
+}
+
+# --- Normalizacja identyfikatorów i pola zdarzenia (nakładki na silnik) ----------------------
+# Użytkownik: bez domeny ("CONTOSO\jan", "jan@contoso.com" -> "jan"), małymi literami;
+# konta komputerów ("host/pc01.contoso.com") zostają w całości.
+function Get-NormUser([string]$Value) { (Get-HistoryEngine)::NormUser($Value) }
 # Komputer: "host/PC01.contoso.com", "CONTOSO\PC01$", "PC01.contoso.com" -> "pc01".
-function Get-NormComputer([string]$Value) {
-    if (-not $Value -or $Value -eq '-') { return '' }
-    $v = $Value.Trim().ToLowerInvariant()
-    if ($v.StartsWith('host/')) { $v = $v.Substring(5) }
-    $i = $v.LastIndexOf('\')
-    if ($i -ge 0) { $v = $v.Substring($i + 1) }
-    $v = $v.TrimEnd('$')
-    $j = $v.IndexOf('.')
-    if ($j -gt 0) { $v = $v.Substring(0, $j) }
-    return $v
-}
-
-function Test-ComputerAccount([string]$Value) {
-    return [bool]($Value -and ($Value.Trim().StartsWith('host/', [StringComparison]::OrdinalIgnoreCase) -or $Value.Trim().EndsWith('$')))
-}
-
+function Get-NormComputer([string]$Value) { (Get-HistoryEngine)::NormComputer($Value) }
+function Test-ComputerAccount([string]$Value) { (Get-HistoryEngine)::IsComputerAccount($Value) }
 # MAC zapisany jako nazwa użytkownika (MAB) - tylko gdy cała nazwa to 12 cyfr szesnastkowych.
-function Get-UserMac($e) {
-    $h = Get-HexMac ([string]$e.User)
-    if ($h.Length -eq 12) { return $h }
-    return ''
-}
-
-function Format-Mac([string]$Hex) {
-    if ($Hex.Length -ne 12) { return $Hex }
-    return ($Hex -replace '(..)(?!$)', '$1-')
-}
-
-function Get-EventSrc($e) {
-    if ($null -ne $e.File) { return 'Log' }   # tylko obiekty z plików .log mają nazwę pliku
-    return 'Ev'
-}
-
-function Get-EventUserDisplay($e) {
-    $u = [string]$e.User
-    if (-not $u -or $u -eq '-') { return '' }
-    $d = [string]$e.Domain
-    if ($d -and $d -ne '-' -and $u -notmatch '[\\@]' -and (Get-EventSrc $e) -eq 'Ev') { return "$d\$u" }
-    return $u
-}
-
-# Komputer, którego dotyczy zdarzenie: nazwa maszyny z dziennika Security albo konto komputera
-# (host/..., NAZWA$) w nazwie użytkownika. W plikach .log "Computer-Name" to serwer NPS, nie klient.
-function Get-EventComputer($e) {
-    if ((Get-EventSrc $e) -eq 'Ev' -and $e.Machine -and $e.Machine -ne '-') { return (Get-NormComputer $e.Machine) }
-    foreach ($u in $e.User, $e.UserFQ) { if (Test-ComputerAccount $u) { return (Get-NormComputer $u) } }
-    return ''
-}
-
-# --- Medium i miejsce w sieci --------------------------------------------------------------
-function Get-EventSsid($e) {
-    $cs = [string]$e.CalledStation
-    if ($cs -match '^(?:[0-9A-Fa-f]{2}[-:.]?){5}[0-9A-Fa-f]{2}[:;](.+)$') { return $Matches[1].Trim() }
-    return ''
-}
-
-function Get-EventMedium($e) {
-    # Tekst typu portu w dzienniku Security jest w języku systemu ("Wireless - IEEE 802.11",
-    # "Drahtlos - IEEE 802.11", "Virtual"...), w plikach .log - numer (19/18 Wi-Fi, 15 LAN, 5 VPN).
-    $t = [string]$e.NasPortType
-    if ($t -match '802\.11|wireless|wi-?fi|bezprzew|drahtlos|sans fil|inal[aá]mbr|^1[89]$') { return 'Wi-Fi' }
-    if ($t -match 'ethernet|^15$') { return 'LAN' }
-    if ($t -match 'virtu|wirtu|vpn|^5$') { return 'VPN' }
-    if (Get-EventSsid $e) { return 'Wi-Fi' }
-    if ([string]$e.CallingStation -match '^\d{1,3}(\.\d{1,3}){3}$') { return 'VPN' }
-    return ''
-}
-
-function Get-EventClientName($e) {
-    foreach ($v in $e.Client, $e.ClientIp, $e.NasIp, $e.NasId) { if ($v -and $v -ne '-') { return [string]$v } }
-    return ''
-}
-
-function Format-Span([TimeSpan]$Span) {
-    if ($Span.TotalDays -ge 1) { return '{0} d {1} godz.' -f [int][Math]::Floor($Span.TotalDays), $Span.Hours }
-    if ($Span.TotalHours -ge 1) { return '{0} godz. {1} min' -f [int][Math]::Floor($Span.TotalHours), $Span.Minutes }
-    if ($Span.TotalMinutes -ge 1) { return '{0} min' -f [int][Math]::Floor($Span.TotalMinutes) }
-    return '{0} s' -f [int][Math]::Floor($Span.TotalSeconds)
-}
+function Get-UserMac($e) { (Get-HistoryEngine)::UserMac($e) }
+function Format-Mac([string]$Hex) { (Get-HistoryEngine)::FormatMac($Hex) }
+function Get-EventSrc($e) { (Get-HistoryEngine)::EventSrc($e) }
+function Get-EventUserDisplay($e) { (Get-HistoryEngine)::EventUserDisplay($e) }
+# Komputer zdarzenia: nazwa maszyny z dziennika Security albo konto komputera (host/..., NAZWA$)
+# w nazwie użytkownika. W plikach .log "Computer-Name" to serwer NPS, nie klient.
+function Get-EventComputer($e) { (Get-HistoryEngine)::EventComputer($e) }
+function Get-EventSsid($e) { (Get-HistoryEngine)::EventSsid($e) }
+# LAN / Wi-Fi / VPN z typu portu (tekst w języku systemu albo numer z pliku .log), SSID albo adresu IP
+function Get-EventMedium($e) { (Get-HistoryEngine)::EventMedium($e) }
+function Get-EventClientName($e) { (Get-HistoryEngine)::EventClientName($e) }
+function Format-Span([TimeSpan]$Span) { (Get-HistoryEngine)::FormatSpan($Span) }
 
 # --- Zapytanie i dopasowanie ---------------------------------------------------------------
 function New-HistoryQuery([string]$Mode, [string]$Value, [bool]$Partial) {
@@ -2449,53 +3149,7 @@ function New-HistoryQuery([string]$Mode, [string]$Value, [bool]$Partial) {
     }
     return $q
 }
-
-function Test-HistoryMatch($e, $Q) {
-    # Najpierw tanie odrzucenie po surowym tekście (dziesiątki tysięcy zdarzeń), dopiero potem
-    # dokładne porównanie po normalizacji.
-    switch ($Q.Mode) {
-        'Mac' {
-            # MAC tylko z pełnych 12 cyfr: przy VPN Calling-Station-Id to adres IP (loadery nie
-            # liczą z niego MacHex), a nazwa użytkownika "abc.def" też "wygląda" na szesnastkową.
-            $mh = [string]$e.MacHex
-            $inUser = ([string]$e.UserHex).Contains($Q.Hex)
-            if (-not ($inUser -or $mh.Contains($Q.Hex))) { return $false }
-            $userHex = $(if ($inUser) { Get-UserMac $e } else { '' })
-            $macHex = $(if ($mh.Length -eq 12) { $mh } else { '' })
-            if ($Q.Partial) { return ($macHex -and $macHex.Contains($Q.Hex)) -or ($userHex -and $userHex.Contains($Q.Hex)) }
-            return ($macHex -eq $Q.Hex) -or ($userHex -eq $Q.Hex)
-        }
-        'User' {
-            foreach ($u in $e.User, $e.UserFQ, $e.Sam) {
-                $s = [string]$u
-                if (-not $s -or $s.IndexOf($Q.Norm, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
-                $n = Get-NormUser $s
-                if (-not $n) { continue }
-                if ($Q.Partial) { if ($n.Contains($Q.Norm)) { return $true } }
-                elseif ($n -eq $Q.Norm) { return $true }
-            }
-            return $false
-        }
-        'Computer' {
-            # Nazwa maszyny tylko z dziennika Security (w .log "Computer-Name" to serwer NPS),
-            # poza tym konta komputerów (host/..., NAZWA$) w nazwie użytkownika.
-            $isEv = -not $e.PSObject.Properties['File']
-            $vals = @($e.Machine, $e.User, $e.UserFQ, $e.Sam)
-            for ($i = 0; $i -lt 4; $i++) {
-                $s = [string]$vals[$i]
-                if (-not $s -or $s.IndexOf($Q.Norm, [StringComparison]::OrdinalIgnoreCase) -lt 0) { continue }
-                if ($i -eq 0) { if (-not $isEv -or $s -eq '-') { continue } }
-                elseif (-not (Test-ComputerAccount $s)) { continue }
-                $n = Get-NormComputer $s
-                if (-not $n) { continue }
-                if ($Q.Partial) { if ($n.Contains($Q.Norm)) { return $true } }
-                elseif ($n -eq $Q.Norm) { return $true }
-            }
-            return $false
-        }
-    }
-    return $false
-}
+function Test-HistoryMatch($e, $Q) { (Get-HistoryEngine)::Match($e, $Q) }
 
 # Wartości do filtra po stronie serwera (zapytanie XML z EventData/Data = ...): dokładne
 # zapisy MAC w formatach spotykanych u producentów. Dla użytkownika i komputera nie da się
@@ -2515,281 +3169,15 @@ function Get-HistoryDataValues($Q) {
     foreach ($f in $forms) { $all.Add($f); $all.Add($f.ToLowerInvariant()) }
     return [string[]]@($all | Select-Object -Unique)
 }
-
-# --- Elementy osi czasu --------------------------------------------------------------------
-# Zdarzenie z obu źródeł opakowane w jeden typ, z policzonymi raz polami do osi czasu.
-# Wykonywane w runspace w tle (Start-HistoryLoad), więc bez potoków - liczy się każda milisekunda.
-function New-HistoryItem($e, [string]$Src, $Q) {
-    $medium = Get-EventMedium $e
-    $client = Get-EventClientName $e
-    $ssid   = Get-EventSsid $e
-    # Port do porównań: NAS-Port (numer) jest w obu źródłach. NAS-Port-Id (nazwa, np.
-    # GigabitEthernet1/0/12) jest tylko w plikach .log - służy wyłącznie do opisu.
-    $portKey = [string]$e.NasPort; if ($portKey -eq '-') { $portKey = '' }
-    $portTxt = $portKey
-    if ($e.NasPortId) { $portTxt = [string]$e.NasPortId }   # tylko w obiektach z plików .log
-    if ($medium -eq 'Wi-Fi') {
-        $portKey = ''
-        $locText = $(if ($ssid -and $client) { "SSID $ssid · $client" } elseif ($ssid) { "SSID $ssid" } else { $client })
-    }
-    elseif ($medium -eq 'VPN') {
-        # NAS-Port przy VPN to numer tunelu / sesji - zmienia się przy każdym połączeniu
-        $portKey = ''
-        $locText = $client
-    }
-    else {
-        $locText = $(if ($portTxt -and $client) { "$client · port $portTxt" } elseif ($portTxt) { "port $portTxt" } else { $client })
-    }
-
-    $kind = [string]$e.Kind; if (-not $kind) { $kind = 'Resp' }
-    $userDisp = Get-EventUserDisplay $e
-    $userN = Get-NormUser ([string]$e.User)
-    $comp = Get-EventComputer $e
-    $macHex = [string]$e.MacHex; if ($macHex.Length -ne 12) { $macHex = '' }
-
-    $parts = [System.Collections.Generic.List[string]]::new()
-    if ($Q.Mode -ne 'User' -and $userDisp) { $parts.Add("użytkownik $userDisp") }
-    if ($Q.Mode -ne 'Mac' -and $e.CallingStation -and $e.CallingStation -ne '-') { $parts.Add($(if ($macHex) { "MAC $($e.CallingStation)" } else { "z adresu $($e.CallingStation)" })) }
-    if ($Q.Mode -ne 'Computer' -and $comp -and -not (Test-ComputerAccount $userDisp)) { $parts.Add("komputer $($comp.ToUpperInvariant())") }
-    if ($e.Policy -and $e.Policy -ne '-') { $parts.Add("zasada: $($e.Policy)") }
-    $at = [string]$e.AuthType; if ($at -eq '-') { $at = '' }
-    $et = [string]$e.EapType; if ($et -eq '-') { $et = '' }
-    $auth = $(if ($at -and $et -and $at -ne $et) { "$at / $et" } elseif ($at) { $at } else { $et })
-    if ($auth) { $parts.Add($auth) }
-    if ($e.FramedIp) { $parts.Add("IP $($e.FramedIp)") }
-    if ($e.SessionTime -and $e.SessionTime -match '^\d+$') { $parts.Add("czas sesji $(Format-Span ([TimeSpan]::FromSeconds([double]$e.SessionTime)))") }
-    if ($e.AcctTerminate) { $parts.Add("koniec sesji: $($e.AcctTerminate)") }
-
-    $title = [string]$e.Result
-    if ($e.Level -ne 'OK' -and $e.ReasonCode -and $e.ReasonCode -ne '0' -and $e.ReasonCode -ne '-') {
-        $r = [string]$e.Reason
-        if ($r.Length -gt 90) { $r = $r.Substring(0, 90) + '...' }
-        $title += $(if ($r -and $r -ne '-') { " - $r (kod $($e.ReasonCode))" } else { " (kod $($e.ReasonCode))" })
-    }
-
-    [pscustomobject]@{
-        Time     = [datetime]$e.Time
-        Src      = $Src
-        Both     = $false
-        Kind     = $kind
-        Level    = [string]$e.Level
-        E        = $e
-        Medium   = $medium
-        PortKey  = $portKey
-        LocText  = $locText
-        Ssid     = $ssid
-        Client   = $client
-        UserN    = $userN
-        UserDisp = $userDisp
-        Computer = $comp
-        MacHex   = $macHex
-        Title    = $title
-        Parts    = $parts
-        Sig      = '{0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}|{9}' -f $e.Level, $e.Result, $e.ReasonCode, $client, $medium, $ssid, $portKey, $userN, $macHex, $kind
-    }
-}
-
-# Łączy elementy z dziennika Security i z plików .log. Odpowiedź (Accept/Reject) z logu, która
-# ma swój odpowiednik w dzienniku Security (ten sam wynik i urządzenie, do 2 s różnicy), nie jest
-# pokazywana drugi raz - zdarzenie z Security dostaje tylko oznaczenie "Security + log".
-function Merge-HistoryItems($EvItems, $LogItems) {
-    $all = New-Object System.Collections.Generic.List[object]
-    $index = @{}
-    foreach ($it in $EvItems) {
-        $all.Add($it)
-        $k = '{0}|{1}' -f $it.Level, [Math]::Floor($it.Time.Ticks / [TimeSpan]::TicksPerSecond)
-        $l = $index[$k]
-        if (-not $l) { $l = [System.Collections.Generic.List[object]]::new(); $index[$k] = $l }
-        $l.Add($it)
-    }
-    foreach ($it in $LogItems) {
-        if ($it.Kind -eq 'Resp' -and $index.Count) {
-            $sec = [Math]::Floor($it.Time.Ticks / [TimeSpan]::TicksPerSecond)
-            $dup = $null
-            for ($d = -2; $d -le 2 -and -not $dup; $d++) {
-                $l = $index['{0}|{1}' -f $it.Level, ($sec + $d)]
-                if (-not $l) { continue }
-                foreach ($c in $l) {
-                    if ($c.Both) { continue }
-                    $same = $(if ($c.MacHex -and $it.MacHex) { $c.MacHex -eq $it.MacHex } else { $c.UserN -and $c.UserN -eq $it.UserN })
-                    if ($same) { $dup = $c; break }
-                }
-            }
-            if ($dup) { $dup.Both = $true; continue }
-        }
-        $all.Add($it)
-    }
-    # Sortowanie po czasie przez Array.Sort kluczy liczbowych (Sort-Object przy dziesiątkach tysięcy
-    # obiektów trwa sekundy). Klucz = czas * 10^7 + pozycja, więc przy równym czasie decyduje kolejność
-    # wejścia: loadery podają najnowsze najpierw, czyli późniejsza pozycja = wcześniejszy wpis.
-    # (Sortujemy same klucze - tablicę obiektów PowerShell przy wywołaniu metody kopiuje.)
-    $n = $all.Count
-    $keys = [decimal[]]::new($n)
-    for ($i = 0; $i -lt $n; $i++) { $keys[$i] = [decimal]$all[$i].Time.Ticks * 10000000 + ($n - $i) }
-    [Array]::Sort($keys)
-    $sorted = New-Object System.Collections.Generic.List[object] $n
-    foreach ($k in $keys) { $sorted.Add($all[$n - [int]($k % 10000000)]) }
-    return , $sorted
-}
-
-function New-HistoryRow([string]$Kind, [datetime]$Time) {
-    [pscustomobject]@{
-        Kind = $Kind; Time = $Time; TimeStr = ''; SubTime = ''; Color = '#8A90A2'; Title = ''; TitleColor = '#E8EAF0'
-        Medium = ''; MediumBg = 'Transparent'; MediumVis = 'Collapsed'; Location = ''; Detail = ''
-        DayVis = $(if ($Kind -eq 'Day') { 'Visible' } else { 'Collapsed' })
-        EventVis = $(if ($Kind -eq 'Event') { 'Visible' } else { 'Collapsed' })
-        MarkerVis = $(if ($Kind -eq 'Change' -or $Kind -eq 'Gap' -or $Kind -eq 'Who') { 'Visible' } else { 'Collapsed' })
-        Items = [System.Collections.Generic.List[object]]::new()
-        Sig = ''; First = $Time; Last = $Time; Info = ''
-    }
-}
-
-function Format-HistoryLocation($It) {
-    $l = $(if ($It.LocText) { $It.LocText } else { '(nieznane miejsce)' })
-    if ($It.Medium) { return "$($It.Medium) · $l" }
-    return $l
-}
-
-# Czy zdarzenie jest w innym miejscu sieci niż ostatnie znane ($S - stan przekazywany między
-# wywołaniami)? Porównujemy tylko pola znane po obu stronach: wpis accounting bez typu portu
-# albo zdarzenie Security bez numeru portu nie oznacza zmiany. Zwraca $true przy zmianie;
-# poprzednie miejsce jest wtedy w $S.Prev.
-function Step-HistoryLocation([hashtable]$S, $It) {
-    if (-not $It.Client) { return $false }
-    if (-not $S.It) { $S.It = $It; $S.Medium = $It.Medium; $S.Ssid = $It.Ssid; $S.Port = $It.PortKey; return $false }
-    $chg = ($S.It.Client -ne $It.Client) -or
-           ($S.Medium -and $It.Medium -and $S.Medium -ne $It.Medium) -or
-           ($S.Ssid -and $It.Ssid -and $S.Ssid -ne $It.Ssid) -or
-           ($S.Port -and $It.PortKey -and $S.Port -ne $It.PortKey)
-    if ($chg) {
-        $S.Prev = $S.It; $S.It = $It; $S.Medium = $It.Medium; $S.Ssid = $It.Ssid; $S.Port = $It.PortKey
-        return $true
-    }
-    if (-not $S.Medium -and $It.Medium) { $S.Medium = $It.Medium; $S.It = $It }
-    if (-not $S.Ssid) { $S.Ssid = $It.Ssid }
-    if (-not $S.Port -and $S.Medium -ne 'Wi-Fi' -and $S.Medium -ne 'VPN') { $S.Port = $It.PortKey }
-    return $false
-}
-
-# Buduje wiersze osi czasu z (przefiltrowanych) zdarzeń posortowanych rosnąco po czasie:
-# zdarzenia (z grupowaniem powtórzeń), znaczniki zmian sieci / urządzenia / użytkownika,
-# przerwy dłuższe niż $script:HistGapMinutes i nagłówki dni.
+# --- Elementy i wiersze osi czasu ----------------------------------------------------------
+# Element: zdarzenie z obu źródeł z policzonymi raz polami (miejsce w sieci, użytkownik, opis...).
+function New-HistoryItem($e, [string]$Src, $Q) { (Get-HistoryEngine)::NewItem($e, $Src, $Q) }
+# Scalenie Security + .log (odpowiedź widoczna w obu - raz, "Security + log"), rosnąco po czasie.
+function Merge-HistoryItems($EvItems, $LogItems) { , (Get-HistoryEngine)::Merge($EvItems, $LogItems) }
+# Wiersze: zdarzenia (z grupowaniem powtórzeń), znaczniki zmian sieci / urządzenia / użytkownika,
+# przerwy dłuższe niż $script:HistGapMinutes i nagłówki dni. Zwraca @{ Rows; Changes }.
 function Build-HistoryRows($Items, $Q, [hashtable]$Opt) {
-    $seq     = New-Object System.Collections.Generic.List[object]
-    $gap     = [TimeSpan]::FromMinutes($script:HistGapMinutes)
-    $prev    = $null
-    $loc     = @{}
-    $lastWho = $null
-    $cur     = $null
-    $changes = 0
-    $whatTxt = $(if ($Q.Mode -eq 'User') { 'użytkownika' } elseif ($Q.Mode -eq 'Computer') { 'komputera' } else { 'urządzenia' })
-
-    foreach ($it in $Items) {
-        if ($prev) {
-            $dt = $it.Time - $prev.Time
-            if ($Opt.Markers -and $dt -gt $gap) {
-                $m = New-HistoryRow 'Gap' $it.Time
-                $m.Title = "brak zdarzeń przez $(Format-Span $dt)"
-                $m.TitleColor = '#8A90A2'
-                $m.Info = "Od $($prev.Time.ToString('yyyy-MM-dd HH:mm:ss')) do $($it.Time.ToString('yyyy-MM-dd HH:mm:ss')) nie było zdarzeń tego $whatTxt. Urządzenie mogło być wyłączone, odłączone albo po prostu nie uwierzytelniało się ponownie (zależy od ustawień reauth na switchu / AP)."
-                $seq.Add($m)
-                $cur = $null
-            }
-        }
-
-        # Zmiana miejsca w sieci (LAN <-> Wi-Fi, inny switch / port / SSID)
-        if (Step-HistoryLocation $loc $it) {
-            $changes++
-            if ($Opt.Markers) {
-                $from = $loc.Prev
-                $m = New-HistoryRow 'Change' $it.Time
-                $kindTxt = $(if ($from.Medium -ne $it.Medium -and $from.Medium -and $it.Medium) { "zmiana sieci $($from.Medium) → $($it.Medium)" } else { 'zmiana miejsca w sieci' })
-                $m.Title = "${kindTxt}:  $(Format-HistoryLocation $from)  →  $(Format-HistoryLocation $it)"
-                $m.TitleColor = '#93C5FD'
-                $m.MediumBg = '#1F2A40'
-                $m.Info = "Poprzednie miejsce ($($from.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $from)`nNastępne ($($it.Time.ToString('yyyy-MM-dd HH:mm:ss'))): $(Format-HistoryLocation $it)"
-                $seq.Add($m)
-                $cur = $null
-            }
-        }
-
-        # Inny użytkownik na tym samym urządzeniu (tryb MAC / komputer) albo inne urządzenie
-        # tego samego użytkownika (tryb użytkownik; MacHex jest pusty, gdy to nie MAC - np. VPN)
-        $who = $(if ($Q.Mode -eq 'User') { $it.MacHex } else { $it.UserN })
-        if ($who) {
-            if ($Opt.Markers -and $lastWho -and $lastWho.Who -ne $who) {
-                $m = New-HistoryRow 'Who' $it.Time
-                if ($Q.Mode -eq 'User') { $m.Title = "inne urządzenie:  $(Format-Mac $lastWho.Who)  →  $(Format-Mac $who)" }
-                else { $m.Title = "inny użytkownik:  $($lastWho.Disp)  →  $($it.UserDisp)" }
-                $m.TitleColor = '#FCD34D'
-                $m.MediumBg = '#3A3320'
-                $m.Info = $m.Title
-                $seq.Add($m)
-                $cur = $null
-            }
-            $lastWho = @{ Who = $who; Disp = $(if ($it.UserDisp) { $it.UserDisp } else { $who }) }
-        }
-
-        if ($Opt.Group -and $cur -and $cur.Sig -eq $it.Sig -and $cur.Last.Date -eq $it.Time.Date -and ($it.Time - $cur.Last) -le $gap) {
-            $cur.Items.Add($it)
-            $cur.Last = $it.Time
-            $prev = $it
-            continue
-        }
-
-        $r = New-HistoryRow 'Event' $it.Time
-        $r.Sig = $it.Sig
-        $r.Items.Add($it)
-        $r.Color = $script:Colors[$it.Level]; if (-not $r.Color) { $r.Color = '#8A90A2' }
-        $r.Title = $it.Title
-        $r.TitleColor = $(switch ($it.Level) { 'Error' { '#F87171' } 'Warn' { '#FBBF24' } 'Info' { '#C9CDD8' } default { '#E8EAF0' } })
-        if ($it.Medium) { $r.Medium = $it.Medium; $r.MediumVis = 'Visible'; $r.MediumBg = $script:MediumBg[$it.Medium] }
-        $r.Location = $it.LocText
-        $seq.Add($r)
-        $cur = $r
-        $prev = $it
-    }
-
-    # Uzupełnienie wierszy (czas, licznik powtórzeń, źródło)
-    foreach ($r in $seq) {
-        if ($r.Kind -ne 'Event') { continue }
-        $n = $r.Items.Count
-        $last = $r.Items[$n - 1]
-        $r.TimeStr = $(if ($Opt.Newest) { $r.Last } else { $r.First }).ToString('HH:mm:ss')
-        if ($n -gt 1) {
-            $edge = $(if ($Opt.Newest) { "od $($r.First.ToString('HH:mm:ss'))" } else { "do $($r.Last.ToString('HH:mm:ss'))" })
-            $r.SubTime = "×$n · $edge"
-        }
-        $both = $false; $hasEv = $false; $hasLog = $false
-        foreach ($x in $r.Items) { if ($x.Both) { $both = $true }; if ($x.Src -eq 'Log') { $hasLog = $true } else { $hasEv = $true } }
-        $srcTxt = $(if ($both -or ($hasEv -and $hasLog)) { 'Security + log' } elseif ($hasLog) { 'log .log' } else { 'Security' })
-        $r.Detail = $(if ($last.Parts.Count) { ($last.Parts -join '  ·  ') + '  ·  ' + $srcTxt } else { $srcTxt })
-    }
-
-    if ($Opt.Newest) { $seq.Reverse() }
-
-    # Nagłówki dni (z liczbą zdarzeń i odmów danego dnia)
-    $dayStats = @{}
-    foreach ($it in $Items) {
-        $st = $dayStats[$it.Time.Date]
-        if (-not $st) { $st = @{ N = 0; Err = 0 }; $dayStats[$it.Time.Date] = $st }
-        $st.N++
-        if ($it.Level -eq 'Error') { $st.Err++ }
-    }
-    $rows = New-Object System.Collections.Generic.List[object]
-    $day = $null
-    foreach ($r in $seq) {
-        if ($day -ne $r.Time.Date) {
-            $day = $r.Time.Date
-            $hd = New-HistoryRow 'Day' $day
-            $hd.Title = $day.ToString('dddd, d MMMM yyyy', $script:PlCulture)
-            $st = $dayStats[$day]
-            if ($st) { $hd.Detail = "zdarzeń: $($st.N)" + $(if ($st.Err) { "  ·  odmów: $($st.Err)" } else { '' }) }
-            $rows.Add($hd)
-        }
-        $rows.Add($r)
-    }
-    return @{ Rows = $rows; Changes = $changes }
+    (Get-HistoryEngine)::BuildRows($Items, $Q, [bool]$Opt.Group, [bool]$Opt.Markers, [bool]$Opt.Newest, [int]$script:HistGapMinutes, $script:Colors, $script:MediumBg, $script:PlCulture)
 }
 
 # --- Okno historii -------------------------------------------------------------------------
@@ -2939,43 +3327,26 @@ function Open-HistoryDefault($e) {
 }
 
 # --- Wczytywanie historii w tle ------------------------------------------------------------
-# Dopasowanie i budowa elementów osi czasu odbywa się w runspace w tle: przy dziesiątkach tysięcy
-# zdarzeń trwa to sekundy i na wątku okna zamroziłoby wszystkie okna aplikacji. Runspace nie
-# widzi funkcji skryptu, więc dostaje ich tekst (te same funkcje co w oknie - jedno źródło).
-$script:HistWorkerFunctions = ''
-function Get-HistoryWorkerFunctions {
-    if (-not $script:HistWorkerFunctions) {
-        $names = 'Get-HexMac', 'Get-NormUser', 'Get-NormComputer', 'Test-ComputerAccount', 'Get-UserMac', 'Format-Mac',
-            'Get-EventSrc', 'Get-EventUserDisplay', 'Get-EventComputer', 'Get-EventSsid', 'Get-EventMedium',
-            'Get-EventClientName', 'Format-Span', 'Test-HistoryMatch', 'New-HistoryItem'
-        $script:HistWorkerFunctions = (@($names | ForEach-Object { (Get-Command -Name $_ -CommandType Function | Select-Object -First 1).ScriptBlock.Ast.Extent.Text })) -join "`r`n`r`n"
-    }
-    return $script:HistWorkerFunctions
-}
-
-# $Loader (tekst $script:EvLoader / $script:LogLoader) z argumentami albo gotowe $Objects (dane
-# z zakładek). Zwraca jeden obiekt: elementy osi czasu, liczbę zdarzeń ze źródła i podsumowanie loadera.
+# Loader (dziennik Security / pliki .log) albo dane z zakładek, a potem dopasowanie i budowa
+# elementów osi czasu (silnik C#) - wszystko w runspace w tle, okna się nie zatrzymują.
+# Zwraca jeden obiekt: elementy, liczbę zdarzeń ze źródła i podsumowanie loadera plików .log.
 $script:HistWorker = {
-    param([string]$Functions, [string]$Loader, [object[]]$LoaderArgs, [object[]]$Objects, $Q, [string]$Src)
-    . ([scriptblock]::Create($Functions))
-    $items = New-Object System.Collections.Generic.List[object]
-    $summary = $null
-    $raw = 0
-    $source = $(if ($Loader) { & ([scriptblock]::Create($Loader)) @LoaderArgs } else { $Objects })
-    foreach ($r in $source) {
-        if ($null -eq $r) { continue }
-        if ($r.PSObject.Properties['IsSummary']) { $summary = $r; continue }
-        $raw++
-        if (Test-HistoryMatch $r $Q) { $items.Add((New-HistoryItem $r $Src $Q)) }
-    }
-    [pscustomobject]@{ HistWorker = $true; Items = $items; Raw = $raw; Summary = $summary }
+    param($Engine, [string]$Loader, [object[]]$LoaderArgs, [object[]]$Objects, $Q, [string]$Src)
+    $source = $(if ($Loader) { @(& ([scriptblock]::Create($Loader)) @LoaderArgs) } else { $Objects })
+    $r = $Engine::BuildItems($source, $Q, $Src)
+    [pscustomobject]@{ HistWorker = $true; Items = $r.Items; Raw = $r.Raw; Summary = $r.Summary }
 }
 
-function Start-HistoryWorker($H, [string]$Src, [string]$Loader, $LoaderArgs, $Objects, $Q) {
+function New-HistoryWorker($Loader, $LoaderArgs, $Objects, $Q, $Src) {
     $ps = [powershell]::Create()
-    [void]$ps.AddScript($script:HistWorker).AddArgument((Get-HistoryWorkerFunctions)).AddArgument($Loader).AddArgument($LoaderArgs).AddArgument($Objects).AddArgument($Q).AddArgument($Src)
-    $H.PS[$Src] = $ps
-    $H.Handles[$Src] = $ps.BeginInvoke()
+    [void]$ps.AddScript([string]$script:HistWorker)
+    [void]$ps.AddArgument((Get-HistoryEngine))
+    [void]$ps.AddArgument([string]$Loader)
+    [void]$ps.AddArgument($LoaderArgs)
+    [void]$ps.AddArgument($Objects)
+    [void]$ps.AddArgument($Q)
+    [void]$ps.AddArgument([string]$Src)
+    return $ps
 }
 
 # Zatrzymanie bez czekania: PowerShell.Stop() czeka, aż Get-WinEvent skończy bieżące skanowanie
@@ -3053,8 +3424,8 @@ function Start-HistoryLoad($H) {
         $H.Range = $null; $H.Max = 0
         $H.RangeText = 'dane wczytane w zakładkach'
         $H.ReqLoaded = $true
-        if ($nEv) { Start-HistoryWorker $H 'Ev' '' $null @($script:Ctx.Ev.All) $q }
-        if ($nLog) { Start-HistoryWorker $H 'Log' '' $null @($script:Ctx.Log.All) $q }
+        if ($nEv) { $H.PS['Ev'] = New-HistoryWorker '' $null @($script:Ctx.Ev.All) $q 'Ev' }
+        if ($nLog) { $H.PS['Log'] = New-HistoryWorker '' $null @($script:Ctx.Log.All) $q 'Log' }
         $msg = "Szukanie w danych zakładek: $($q.Label)..."
     }
     else {
@@ -3068,14 +3439,15 @@ function Start-HistoryLoad($H) {
         if ($useEv) {
             $dv = Get-HistoryDataValues $q
             $H.Prefilter = [bool]$dv
-            Start-HistoryWorker $H 'Ev' ([string]$script:EvLoader) @($ui.txtServer.Text.Trim(), $range[0], $range[1], $H.Max, $dv) $null $q
+            $H.PS['Ev'] = New-HistoryWorker ([string]$script:EvLoader) @($ui.txtServer.Text.Trim(), $range[0], $range[1], $H.Max, $dv) $null $q 'Ev'
         }
         if ($useLog) {
             $mv = $(if ($q.Mode -eq 'Mac') { $q.Hex } else { $q.Norm })
-            Start-HistoryWorker $H 'Log' ([string]$script:LogLoader) @([string[]]$paths, $mask, $range[0], $range[1], $H.Max, $q.Mode, $mv, [bool]$q.Partial, $skipReq) $null $q
+            $H.PS['Log'] = New-HistoryWorker ([string]$script:LogLoader) @([string[]]$paths, $mask, $range[0], $range[1], $H.Max, $q.Mode, $mv, [bool]$q.Partial, $skipReq) $null $q 'Log'
         }
         $msg = "Wczytywanie historii: $($q.Label), $($H.RangeText)$(if ($H.Prefilter) { ' (filtr MAC po stronie serwera)' } else { ' - skanowanie zakresu, może potrwać' })..."
     }
+    foreach ($k in @($H.PS.Keys)) { $H.Handles[$k] = $H.PS[$k].BeginInvoke() }
     $H.Busy = $true
     $H.LoadStarted = Get-Date
     $u.hLoad.IsEnabled = $false
@@ -3125,8 +3497,8 @@ function Complete-HistoryLoad($H) {
                     $notes.Add($(if ($H.Prefilter) { "osiągnięto limit $($H.Max) zdarzeń z dziennika - pokazano najnowsze" } else { "przeszukano tylko $($H.Max) najnowszych zdarzeń z dziennika - zwiększ MAKS. ZDARZEŃ albo zawęź zakres" }))
                 }
                 if ($H.Prefilter) {
-                    $logOnly = 0
-                    foreach ($it in $H.Items) { if ($it.Src -eq 'Log' -and $it.Kind -eq 'Resp') { $logOnly++ } }
+                    $st = (Get-HistoryEngine)::Summarize($H.Items)
+                    $logOnly = [int]$st.LogOnly
                     if ($nEv -eq 0) { $notes.Add('w dzienniku szukano dokładnego zapisu MAC (AA-BB-CC-DD-EE-FF, aabbccddeeff, aabb.ccdd.eeff, aabb-ccdd-eeff...) - jeśli switch zapisuje go inaczej, zaznacz Dopasowanie częściowe') }
                     elseif ($logOnly -gt 0) { $notes.Add("$logOnly odpowiedzi (Accept / Reject) z plików .log nie ma w dzienniku Security - to inny serwer NPS albo switch zapisuje MAC inaczej (wtedy zaznacz Dopasowanie częściowe)") }
                 }
@@ -3162,33 +3534,16 @@ function Complete-HistoryLoad($H) {
 function Update-HistoryView($H) {
     if (-not $H -or $H.Suspend) { return }
     $u = $H.Ui
-    $res = $u.hResult.SelectedIndex
-    $showReq = [bool]$u.hReq.IsChecked
-    $showAcct = [bool]$u.hAcct.IsChecked
-    $base = New-Object System.Collections.Generic.List[object]
-    foreach ($it in $H.Items) {
-        if (-not $showReq -and $it.Kind -eq 'Req') { continue }
-        if (-not $showAcct -and $it.Kind -eq 'Acct') { continue }
-        if ($res -eq 1 -and $it.Level -ne 'OK') { continue }
-        if ($res -eq 2 -and $it.Level -ne 'Error') { continue }
-        if ($res -eq 3 -and ($it.Level -eq 'OK' -or $it.Level -eq 'Error')) { continue }
-        $base.Add($it)
-    }
-    $H.Base = $base
+    $f = (Get-HistoryEngine)::Filter($H.Items, [int]$u.hResult.SelectedIndex, [bool]$u.hReq.IsChecked, [bool]$u.hAcct.IsChecked, $H.ZoomFrom, $H.ZoomTo)
+    $H.Base = $f.Base
     $H.BaseVer++
-    $view = $base
-    if ($H.ZoomFrom) {
-        $view = New-Object System.Collections.Generic.List[object]
-        foreach ($it in $base) { if ($it.Time -ge $H.ZoomFrom -and $it.Time -lt $H.ZoomTo) { $view.Add($it) } }
-    }
+    $view = $f.View
     $H.View = $view
     if (-not $H.Q) { return }
     $b = Build-HistoryRows $view $H.Q @{ Group = [bool]$u.hGroup.IsChecked; Markers = [bool]$u.hMarkers.IsChecked; Newest = [bool]$u.hNewest.IsChecked }
     $H.Rows = $b.Rows
     $u.hList.ItemsSource = $b.Rows
-    $ok = 0; $er = 0
-    foreach ($it in $view) { if ($it.Level -eq 'OK') { $ok++ } elseif ($it.Level -eq 'Error') { $er++ } }
-    $u.hCounts.Text = "W widoku: $($view.Count) / $($H.Items.Count)    Udzielono: $ok    Odmowa: $er    Zmian miejsca w sieci: $($b.Changes)"
+    $u.hCounts.Text = "W widoku: $($view.Count) / $($H.Items.Count)    Udzielono: $($f.Ok)    Odmowa: $($f.Er)    Zmian miejsca w sieci: $($b.Changes)"
     if ($H.ZoomFrom) {
         $u.hZoomText.Text = "Widok zawężony: $($H.ZoomFrom.ToString('yyyy-MM-dd HH:mm')) - $($H.ZoomTo.ToString('yyyy-MM-dd HH:mm'))"
         $u.hZoomClear.Visibility = 'Visible'
@@ -3230,25 +3585,14 @@ function Update-HistorySummary($H) {
     $u.hChips.Children.Clear()
     $u.hRelated.Children.Clear()
     $items = $H.Items
+    $s = (Get-HistoryEngine)::Summarize($items)
+    $H.Stats = $s
     if (-not $items.Count) {
         [void]$u.hChips.Children.Add((New-HistoryChip 'Brak zdarzeń dla wybranego zapytania w tym zakresie' '#FBBF24'))
         return
     }
-    $first = $items[0].Time; $last = $items[$items.Count - 1].Time
-    $ok = 0; $err = 0
-    $users = @{}; $macs = @{}; $comps = @{}; $clients = @{}; $ssids = @{}; $pols = @{}; $media = @{}
-    $lastErr = $null; $loc = @{}; $changes = 0
-    foreach ($it in $items) {
-        if ($it.Level -eq 'OK') { $ok++ } elseif ($it.Level -eq 'Error') { $err++; $lastErr = $it }
-        if ($it.UserDisp) { $users[$it.UserDisp] = 1 + [int]$users[$it.UserDisp] }
-        if ($it.MacHex.Length -eq 12) { $macs[$it.MacHex] = 1 + [int]$macs[$it.MacHex] }
-        if ($it.Computer) { $comps[$it.Computer] = 1 + [int]$comps[$it.Computer] }
-        if ($it.Client) { $clients[$it.Client] = 1 + [int]$clients[$it.Client] }
-        if ($it.Ssid) { $ssids[$it.Ssid] = 1 + [int]$ssids[$it.Ssid] }
-        if ($it.E.Policy -and $it.E.Policy -ne '-') { $pols[[string]$it.E.Policy] = 1 + [int]$pols[[string]$it.E.Policy] }
-        if ($it.Medium) { $media[$it.Medium] = 1 + [int]$media[$it.Medium] }
-        if (Step-HistoryLocation $loc $it) { $changes++ }
-    }
+    $first = $s.First; $last = $s.Last; $ok = $s.Ok; $err = $s.Err; $lastErr = $s.LastErr; $changes = $s.Changes
+    $users = $s.Users; $macs = $s.Macs; $comps = $s.Comps; $clients = $s.Clients; $ssids = $s.Ssids; $pols = $s.Pols; $media = $s.Media
     $c = $u.hChips.Children
     [void]$c.Add((New-HistoryChip "Pierwsze: $($first.ToString('yyyy-MM-dd HH:mm:ss'))"))
     [void]$c.Add((New-HistoryChip "Ostatnie: $($last.ToString('yyyy-MM-dd HH:mm:ss'))"))
@@ -3338,14 +3682,8 @@ function Update-HistoryStrip($H) {
     $span = ($t1 - $t0).Ticks / $n
     $key = "$($H.BaseVer)|$($t0.Ticks)|$($t1.Ticks)"
     if (-not $H.StripCache -or $H.StripCache.Key -ne $key) {
-        $ok = New-Object int[] $n; $er = New-Object int[] $n; $ot = New-Object int[] $n
-        $t0t = $t0.Ticks
-        foreach ($it in $items) {
-            $i = [int][Math]::Floor(($it.Time.Ticks - $t0t) / $span)
-            if ($i -lt 0) { $i = 0 } elseif ($i -ge $n) { $i = $n - 1 }
-            if ($it.Level -eq 'OK') { $ok[$i]++ } elseif ($it.Level -eq 'Error') { $er[$i]++ } else { $ot[$i]++ }
-        }
-        $H.StripCache = @{ Key = $key; Ok = $ok; Er = $er; Ot = $ot }
+        $bk = (Get-HistoryEngine)::Buckets($items, $t0, $t1, $n)
+        $H.StripCache = @{ Key = $key; Ok = $bk.Ok; Er = $bk.Er; Ot = $bk.Ot }
     }
     $ok = $H.StripCache.Ok; $er = $H.StripCache.Er; $ot = $H.StripCache.Ot
     $mx = 1
