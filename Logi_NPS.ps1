@@ -2888,7 +2888,7 @@ function Start-HistoryLoad($H) {
 
 function Complete-HistoryLoad($H) {
     if (-not $H -or -not $H.Busy) { return }
-    foreach ($h in $H.Handles.Values) { if (-not $h.IsCompleted) { return } }
+    foreach ($hnd in $H.Handles.Values) { if (-not $hnd.IsCompleted) { return } }
     $H.Timer.Stop()
     $q = $H.Q
     $ev = New-Object System.Collections.Generic.List[object]
@@ -3109,9 +3109,9 @@ function Update-HistoryStrip($H) {
     $H.Buckets = @()
     $items = $H.Base
     $w = $u.hStripHost.ActualWidth - 8
-    $h = $u.hStripHost.ActualHeight - 8
+    $ht = $u.hStripHost.ActualHeight - 8
     $u.hStripFrom.Text = ''; $u.hStripTo.Text = ''
-    if (-not $items -or $items.Count -eq 0 -or $w -lt 40 -or $h -lt 10) { return }
+    if (-not $items -or $items.Count -eq 0 -or $w -lt 40 -or $ht -lt 10) { return }
 
     $t0 = $items[0].Time; $t1 = $items[$items.Count - 1].Time
     if ($H.Range -and $H.RangeText -ne 'dane wczytane w zakładkach') { $t0 = $H.Range[0]; $t1 = $H.Range[1] }
@@ -3133,10 +3133,10 @@ function Update-HistoryStrip($H) {
         $buckets.Add(@{ From = $from; To = $to })
         $tot = $ok[$i] + $er[$i] + $ot[$i]
         if (-not $tot) { continue }
-        $y = $h + 4
+        $y = $ht + 4
         foreach ($seg in @(@($ok[$i], '#4ADE80'), @($ot[$i], '#FBBF24'), @($er[$i], '#F87171'))) {
             if (-not $seg[0]) { continue }
-            $sh = [Math]::Max(2, $h * $seg[0] / $mx)
+            $sh = [Math]::Max(2, $ht * $seg[0] / $mx)
             $rc = New-Object System.Windows.Shapes.Rectangle
             $rc.Width = [Math]::Max(1, $bw - 2)
             $rc.Height = $sh
@@ -3154,7 +3154,7 @@ function Update-HistoryStrip($H) {
         $x1 = 4 + $w * (($H.ZoomTo - $t0).Ticks / ($t1 - $t0).Ticks)
         $x0 = [Math]::Max(0, [Math]::Min($w + 8, $x0)); $x1 = [Math]::Max($x0 + 2, [Math]::Min($w + 8, $x1))
         $ov = New-Object System.Windows.Shapes.Rectangle
-        $ov.Width = $x1 - $x0; $ov.Height = $h + 8
+        $ov.Width = $x1 - $x0; $ov.Height = $ht + 8
         $ov.Fill = Get-Brush '#334F8CFF'
         $ov.IsHitTestVisible = $false
         [System.Windows.Controls.Canvas]::SetLeft($ov, $x0)

@@ -50,6 +50,16 @@ Aplikacja oferuje trzy główne sekcje:
   - **Zawartości wiadomości**
 - Wskazówki diagnostyczne dla typowych problemów
 
+### 🕒 Historia urządzenia / użytkownika / komputera (oś czasu)
+Osobne okno z pełnym „łańcuchem zdarzeń” jednego **MAC**, **użytkownika** albo **komputera** – jak oś czasu w konsolach antywirusowych. Przydatne, gdy urządzenie przechodzi np. z Wi-Fi na kabel i z powrotem, a gdzieś po drodze dostaje odmowę.
+- Otwieranie: **dwuklik na wierszu** tabeli, menu kontekstowe (*Historia tego urządzenia / użytkownika / komputera*) albo przycisk **Historia urządzenia / użytkownika...** w nagłówku (można też wpisać MAC w dowolnym formacie). Można mieć otwartych kilka okien naraz.
+- **Zakres czasu**: od ręki z danych wczytanych w zakładkach albo wczytanie w tle ostatniej godziny, 24 h, 7 / 30 / 90 dni lub własnego zakresu – z dziennika Security (dla MAC filtr wykonuje sam dziennik, więc działa szybko także na dużym logu) i/lub z plików `.log` (filtr już podczas czytania plików).
+- **Oś czasu**: nagłówki dni (z liczbą zdarzeń i odmów), kolorowe kropki wyniku, plakietka **LAN / Wi-Fi / VPN**, switch / port / SSID, zasada, metoda uwierzytelnienia, adres IP i czas sesji z accountingu.
+- **Zaznaczone zdarzenia przełomowe**: zmiana sieci (LAN ↔ Wi-Fi, inny switch / port / SSID), inny użytkownik na urządzeniu albo inne urządzenie użytkownika, przerwy dłuższe niż godzina. Powtórzenia (np. reautoryzacje co kilka minut) są zgrupowane jako „×N od–do”.
+- **Pasek aktywności** – słupki udzielono / odmowa w czasie; kliknięcie słupka zawęża widok do tego odcinka. Menu: *tylko ten dzień*, *godzina przed i po*, *od / do tego momentu*.
+- **Podsumowanie**: pierwsze / ostatnie zdarzenie, liczba odmów i ostatnia odmowa, zmiany miejsca w sieci, udział LAN / Wi-Fi; powiązani użytkownicy, urządzenia (MAC) i komputery – kliknięcie otwiera ich historię – oraz switche, SSID i zasady.
+- Szczegóły zaznaczonego zdarzenia jak w zakładkach, **Kopiuj oś czasu** (tekst do zgłoszenia) i **Eksport CSV**. Zdarzenia widoczne jednocześnie w dzienniku Security i w pliku `.log` są pokazywane raz („Security + log”).
+
 ## Wymagania
 
 - **Windows Server** 2012 R2 lub nowszy
@@ -65,7 +75,8 @@ Aplikacja oferuje trzy główne sekcje:
 
 ## Uwagi
 
-- **Wczytywanie w tle**: UI nie blokuje się podczas pobierania danych
+- **Wczytywanie w tle**: UI nie blokuje się podczas pobierania danych (także w oknie historii)
+- **Test dymny**: `tests/Smoke-NpsViewer.ps1` (uruchamiany w GitHub Actions na Windows PowerShell 5.1) sprawdza logikę osi czasu i otwiera okna na danych testowych
 - **Dane nie odblokowywane**: Pliki `.log` są otwierane bez blokowania — NPS może dalej pisać
 - **Audyt**: Jeśli brak zdarzeń, sprawdź audyt:
   ```powershell
