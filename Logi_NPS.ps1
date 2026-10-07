@@ -964,7 +964,17 @@ $script:EvLoader = {
     }
     if ($Max -gt 0) { $p.MaxEvents = $Max }
     if ($Computer)  { $p.ComputerName = $Computer }
-    if ($DataValues) { $p.FilterHashtable.Data = $DataValues }
+    if ($DataValues) {
+        # Dla historii zapytanie XML zamiast FilterHashtable: FilterHashtable w Windows PowerShell 5.1
+        # po cichu zwraca "brak zdarzeń", gdy zapytanie okaże się za złożone (limit ok. 20 wyrażeń
+        # XPath), a XML zgłasza błąd. Zakres ID (2 wyrażenia zamiast 8) zostawia miejsce na warianty MAC.
+        # Porównanie Data='...' w dzienniku rozróżnia wielkość liter - stąd warianty małymi i dużymi.
+        $fmt = 'yyyy-MM-ddTHH:mm:ss.fffZ'
+        $time = "TimeCreated[@SystemTime&gt;='$($Start.ToUniversalTime().ToString($fmt))' and @SystemTime&lt;='$($End.ToUniversalTime().ToString($fmt))']"
+        $vals = (@($DataValues | ForEach-Object { "Data='$($_ -replace "[^0-9A-Za-z\-:\.]", '')'" })) -join ' or '
+        $p.Remove('FilterHashtable')
+        $p.FilterXml = [xml]"<QueryList><Query Id='0' Path='Security'><Select Path='Security'>*[System[(EventID&gt;=6272 and EventID&lt;=6280 and EventID!=6275) and $time] and EventData[$vals]]</Select></Query></QueryList>"
+    }
 
     try { $events = @(Get-WinEvent @p) }
     catch {
@@ -1053,7 +1063,13 @@ $script:LogLoader = {
         '265' = 'Certyfikat z niezaufanego urzędu'
     }
     $authNames = @{ '1' = 'PAP'; '2' = 'CHAP'; '3' = 'MS-CHAP'; '4' = 'MS-CHAPv2'; '5' = 'EAP'; '7' = 'Brak'; '8' = 'Custom'; '9' = 'MS-CHAP CPW'; '10' = 'MS-CHAPv2 CPW'; '11' = 'PEAP' }
-    $portTypes = @{ '0' = 'Async'; '1' = 'Sync'; '2' = 'ISDN Sync'; '5' = 'Virtual'; '15' = 'Ethernet'; '19' = 'Wireless-802.11' }
+    $portTypes = @{ '0' = 'Async'; '1' = 'Sync'; '2' = 'ISDN Sync'; '5' = 'Virtual'; '15' = 'Ethernet'; '17' = 'Cable'; '18' = 'Wireless-Other'; '19' = 'Wireless-802.11' }
+    $termCauses = @{
+        '1' = 'User-Request (wylogowanie / roaming)'; '2' = 'Lost-Carrier (odłączony kabel / poza zasięgiem)'; '3' = 'Lost-Service'
+        '4' = 'Idle-Timeout (bezczynność)'; '5' = 'Session-Timeout (koniec czasu sesji)'; '6' = 'Admin-Reset'; '7' = 'Admin-Reboot'
+        '8' = 'Port-Error'; '9' = 'NAS-Error'; '10' = 'NAS-Request'; '11' = 'NAS-Reboot'; '16' = 'Callback'
+        '19' = 'Supplicant-Restart'; '20' = 'Reauthentication-Failure (nieudana reautoryzacja)'; '21' = 'Port-Reinit'; '22' = 'Port-Disabled'
+    }
     $providers = @{ '0' = 'Brak'; '1' = 'Windows'; '2' = 'Zdalny serwer RADIUS' }
     $acctTypes = @{ '1' = 'Start'; '2' = 'Stop'; '3' = 'Interim'; '7' = 'Acct-On'; '8' = 'Acct-Off' }
 
@@ -1065,9 +1081,10 @@ $script:LogLoader = {
         '4128' = 'Client-Friendly-Name'; '4129' = 'SAM-Account-Name'; '4130' = 'Fully-Qualifed-User-Name'
         '4132' = 'EAP-Friendly-Name'; '4136' = 'Packet-Type'; '4142' = 'Reason-Code'; '4149' = 'NP-Policy-Name'
         '4154' = 'Proxy-Policy-Name'; '4155' = 'Provider-Type'
-        '8' = 'Framed-IP-Address'; '46' = 'Acct-Session-Time'; '49' = 'Acct-Terminate-Cause'
+        '8' = 'Framed-IP-Address'; '25' = 'Class'; '41' = 'Acct-Delay-Time'; '46' = 'Acct-Session-Time'
+        '49' = 'Acct-Terminate-Cause'; '87' = 'NAS-Port-Id'
     }
-    $mergeKeys = 'User-Name', 'Calling-Station-Id', 'Called-Station-Id', 'NAS-Port', 'NAS-Port-Type', 'NAS-Identifier', 'NAS-IP-Address'
+    $mergeKeys = 'User-Name', 'Calling-Station-Id', 'Called-Station-Id', 'NAS-Port', 'NAS-Port-Type', 'NAS-Identifier', 'NAS-IP-Address', 'NAS-Port-Id'
 
     $rxAttr = New-Object System.Text.RegularExpressions.Regex '<([A-Za-z0-9\-]+)(?:\s[^>]*)?>([^<]*)</\1>', 'Compiled'
     $rxTs   = New-Object System.Text.RegularExpressions.Regex '<Timestamp[^>]*>([^<]+)</Timestamp>', 'Compiled'
@@ -1101,6 +1118,7 @@ $script:LogLoader = {
                 if (-not $v) { continue }
                 if ($k -eq 'User-Name' -and $v -notmatch '^[0-9A-Fa-f:\.\-\s]+$') { continue }
                 $h = ($v -replace '[^0-9A-Fa-f]', '').ToUpper()
+                if ($k -eq 'User-Name' -and $h.Length -ne 12) { continue }
                 if ($MatchPartial) { if ($h -and $h.Contains($MatchValue)) { return $true } }
                 elseif ($h -eq $MatchValue) { return $true }
             }
@@ -1140,6 +1158,10 @@ $script:LogLoader = {
 
     $queue   = New-Object 'System.Collections.Generic.Queue[object]'
     $lastReq = @{}
+    # Żądanie i odpowiedź (Accept / Reject / Challenge) mają ten sam atrybut Class - to pewny klucz.
+    # "Ostatnie żądanie od tego samego klienta RADIUS" zostaje jako zapas dla wpisów bez Class:
+    # przy WLC / switchu uwierzytelniającym wielu klientów naraz przypisywało MAC innego urządzenia.
+    $reqByClass = @{}
     $stat    = @{ Lines = 0; Parsed = 0; Skipped = 0; Unsupported = 0 }
     $errors  = New-Object System.Collections.Generic.List[string]
 
@@ -1183,10 +1205,16 @@ $script:LogLoader = {
                         $stat.Parsed++
                         $pt  = [string]$d['Packet-Type']
                         $key = $d['Client-IP-Address']; if (-not $key) { $key = $d['Client-Friendly-Name'] }
-                        if ($pt -eq '1') { if ($key) { $lastReq[$key] = $d } }
+                        $cls = [string]$d['Class']
+                        if ($pt -eq '1') {
+                            if ($key) { $lastReq[$key] = $d }
+                            if ($cls) { if ($reqByClass.Count -gt 50000) { $reqByClass.Clear() }; $reqByClass[$cls] = $d }
+                        }
                         elseif ($pt -eq '2' -or $pt -eq '3' -or $pt -eq '11') {
-                            if ($key -and $lastReq.ContainsKey($key)) {
-                                $rq = $lastReq[$key]
+                            $rq = $null
+                            if ($cls -and $reqByClass.ContainsKey($cls)) { $rq = $reqByClass[$cls]; $reqByClass.Remove($cls) }
+                            elseif ($key -and $lastReq.ContainsKey($key)) { $rq = $lastReq[$key] }
+                            if ($rq) {
                                 foreach ($k in $mergeKeys) { if (-not $d[$k] -and $rq[$k]) { $d[$k] = $rq[$k]; $d['#Merged'] = $true } }
                             }
                         }
@@ -1217,10 +1245,16 @@ $script:LogLoader = {
                 $stat.Parsed++
                 $pt  = [string]$d['Packet-Type']
                 $key = $d['Client-IP-Address']; if (-not $key) { $key = $d['Client-Friendly-Name'] }
-                if ($pt -eq '1') { if ($key) { $lastReq[$key] = $d } }
+                $cls = [string]$d['Class']
+                if ($pt -eq '1') {
+                    if ($key) { $lastReq[$key] = $d }
+                    if ($cls) { if ($reqByClass.Count -gt 50000) { $reqByClass.Clear() }; $reqByClass[$cls] = $d }
+                }
                 elseif ($pt -eq '2' -or $pt -eq '3' -or $pt -eq '11') {
-                    if ($key -and $lastReq.ContainsKey($key)) {
-                        $rq = $lastReq[$key]
+                    $rq = $null
+                    if ($cls -and $reqByClass.ContainsKey($cls)) { $rq = $reqByClass[$cls]; $reqByClass.Remove($cls) }
+                    elseif ($key -and $lastReq.ContainsKey($key)) { $rq = $lastReq[$key] }
+                    if ($rq) {
                         foreach ($k in $mergeKeys) { if (-not $d[$k] -and $rq[$k]) { $d[$k] = $rq[$k]; $d['#Merged'] = $true } }
                     }
                 }
@@ -1305,6 +1339,8 @@ $script:LogLoader = {
             Merged         = [bool]$d['#Merged']
             FramedIp       = $d['Framed-IP-Address']
             SessionTime    = $d['Acct-Session-Time']
+            NasPortId      = $d['NAS-Port-Id']
+            AcctTerminate  = $(if ($d['Acct-Terminate-Cause']) { $tc = [string]$d['Acct-Terminate-Cause']; if ($termCauses[$tc]) { $termCauses[$tc] } else { "kod $tc" } } else { '' })
             MacHex         = ($calling -replace '[^0-9A-Fa-f]', '').ToUpper()
             UserHex        = ($user -replace '[^0-9A-Fa-f]', '').ToUpper()
             Attrs          = $d
@@ -2307,6 +2343,13 @@ function Test-ComputerAccount([string]$Value) {
     return [bool]($Value -and ($Value.Trim().StartsWith('host/', [StringComparison]::OrdinalIgnoreCase) -or $Value.Trim().EndsWith('$')))
 }
 
+# MAC zapisany jako nazwa użytkownika (MAB) - tylko gdy cała nazwa to 12 cyfr szesnastkowych.
+function Get-UserMac($e) {
+    $h = Get-HexMac ([string]$e.User)
+    if ($h.Length -eq 12) { return $h }
+    return ''
+}
+
 function Format-Mac([string]$Hex) {
     if ($Hex.Length -ne 12) { return $Hex }
     return ($Hex -replace '(..)(?!$)', '$1-')
@@ -2341,11 +2384,14 @@ function Get-EventSsid($e) {
 }
 
 function Get-EventMedium($e) {
+    # Tekst typu portu w dzienniku Security jest w języku systemu ("Wireless - IEEE 802.11",
+    # "Drahtlos - IEEE 802.11", "Virtual"...), w plikach .log - numer (19/18 Wi-Fi, 15 LAN, 5 VPN).
     $t = [string]$e.NasPortType
-    if ($t -match 'Wireless|802\.11|bezprzewod|^19$') { return 'Wi-Fi' }
-    if ($t -match 'Ethernet|^15$') { return 'LAN' }
-    if ($t -match 'Virtual|wirtualn|^5$') { return 'VPN' }
+    if ($t -match '802\.11|wireless|wi-?fi|bezprzew|drahtlos|sans fil|inal[aá]mbr|^1[89]$') { return 'Wi-Fi' }
+    if ($t -match 'ethernet|^15$') { return 'LAN' }
+    if ($t -match 'virtu|wirtu|vpn|^5$') { return 'VPN' }
     if (Get-EventSsid $e) { return 'Wi-Fi' }
+    if ([string]$e.CallingStation -match '^\d{1,3}(\.\d{1,3}){3}$') { return 'VPN' }
     return ''
 }
 
@@ -2389,9 +2435,12 @@ function New-HistoryQuery([string]$Mode, [string]$Value, [bool]$Partial) {
 function Test-HistoryMatch($e, $Q) {
     switch ($Q.Mode) {
         'Mac' {
-            $userHex = Get-HexMac ([string]$e.User)
-            if ($Q.Partial) { return ($e.MacHex -and (Test-Contains $e.MacHex $Q.Hex)) -or ($userHex -and (Test-Contains $userHex $Q.Hex)) }
-            return ($e.MacHex -eq $Q.Hex) -or ($userHex -eq $Q.Hex)
+            # MAC tylko z pełnych 12 cyfr: przy VPN Calling-Station-Id to adres IP, a nazwa
+            # użytkownika "abc.def" też "wygląda" na szesnastkową.
+            $userHex = Get-UserMac $e
+            $macHex = $(if (([string]$e.MacHex).Length -eq 12) { [string]$e.MacHex } else { '' })
+            if ($Q.Partial) { return ($macHex -and $macHex.Contains($Q.Hex)) -or ($userHex -and $userHex.Contains($Q.Hex)) }
+            return ($macHex -eq $Q.Hex) -or ($userHex -eq $Q.Hex)
         }
         'User' {
             foreach ($u in $e.User, $e.UserFQ, $e.Sam) {
@@ -2441,7 +2490,8 @@ function New-HistoryItem($e, [string]$Src, $Q) {
     $medium = Get-EventMedium $e
     $client = Get-EventClientName $e
     $ssid   = Get-EventSsid $e
-    $port   = [string]$e.NasPort; if ($port -eq '-') { $port = '' }
+    $port   = $(if ($e.PSObject.Properties['NasPortId'] -and $e.NasPortId) { [string]$e.NasPortId } else { [string]$e.NasPort })
+    if ($port -eq '-') { $port = '' }
     if ($medium -eq 'Wi-Fi') {
         $locText = (@($(if ($ssid) { "SSID $ssid" }), $client) | Where-Object { $_ }) -join ' · '
         $locKey  = "Wi-Fi|$client|$ssid"
@@ -2465,6 +2515,7 @@ function New-HistoryItem($e, [string]$Src, $Q) {
     if ($auth) { $parts.Add($auth) }
     if ($e.PSObject.Properties['FramedIp'] -and $e.FramedIp) { $parts.Add("IP $($e.FramedIp)") }
     if ($e.PSObject.Properties['SessionTime'] -and $e.SessionTime -match '^\d+$') { $parts.Add("czas sesji $(Format-Span ([TimeSpan]::FromSeconds([double]$e.SessionTime)))") }
+    if ($e.PSObject.Properties['AcctTerminate'] -and $e.AcctTerminate) { $parts.Add("koniec sesji: $($e.AcctTerminate)") }
 
     $title = [string]$e.Result
     if ($e.Level -ne 'OK' -and $e.ReasonCode -and $e.ReasonCode -ne '0' -and $e.ReasonCode -ne '-') {
@@ -2790,7 +2841,7 @@ function Open-HistoryFromEvent($e, [string]$Mode, [int]$RangeIndex = -1, [string
     if (-not $e) { return }
     switch ($Mode) {
         'Mac' {
-            $hex = $(if (([string]$e.MacHex).Length -eq 12) { $e.MacHex } else { Get-HexMac ([string]$e.User) })
+            $hex = $(if (([string]$e.MacHex).Length -eq 12) { $e.MacHex } else { Get-UserMac $e })
             if (-not $hex -or $hex.Length -ne 12) { Show-Msg 'To zdarzenie nie zawiera adresu MAC klienta.' 'Information'; return }
             [void](Show-HistoryWindow -Mode 'Mac' -Value (Format-Mac $hex) -RangeIndex $RangeIndex -From $From -To $To)
         }
@@ -2810,7 +2861,7 @@ function Open-HistoryFromEvent($e, [string]$Mode, [int]$RangeIndex = -1, [string
 # Domyślnie historia urządzenia (MAC), a gdy zdarzenie nie ma MAC - historia użytkownika.
 function Open-HistoryDefault($e) {
     if (-not $e) { return }
-    $hex = $(if (([string]$e.MacHex).Length -eq 12) { $e.MacHex } else { Get-HexMac ([string]$e.User) })
+    $hex = $(if (([string]$e.MacHex).Length -eq 12) { $e.MacHex } else { Get-UserMac $e })
     if ($hex -and $hex.Length -eq 12) { Open-HistoryFromEvent $e 'Mac' } else { Open-HistoryFromEvent $e 'User' }
 }
 

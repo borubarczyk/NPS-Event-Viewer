@@ -174,7 +174,7 @@ Save-Png $H2.Win '04-historia-uzytkownik'
 
 # --- Prawdziwe zapytanie do dziennika Security (filtr MAC przez FilterHashtable Data) i plik .log ---
 # LogLoader z filtrem MAC na prawdziwym pliku DTS
-$dir = Join-Path $OutDir 'logs'; New-Item -ItemType Directory -Path $dir -Force | Out-Null
+$dirBase = Join-Path $OutDir 'logs'; $dir = Join-Path $dirBase 'mac'; New-Item -ItemType Directory -Path $dir -Force | Out-Null
 $t = (Get-Date).AddMinutes(-30)
 $f = { param($dt) $dt.ToString('MM/dd/yyyy HH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture) }
 $lines = @(
@@ -196,6 +196,28 @@ Check 'loader user filter' (@($outU | Where-Object { -not $_.PSObject.Properties
 $outAll = @(& $script:LogLoader @($dir) 'IN*.log' ((Get-Date).AddHours(-1)) (Get-Date) 0)
 Check 'loader no filter = all' (@($outAll | Where-Object { -not $_.PSObject.Properties['IsSummary'] }).Count -eq 5)
 
+# Parowanie odpowiedzi z żądaniem po Class (dwóch klientów tego samego WLC naraz)
+$dir2 = Join-Path $dirBase 'class'; New-Item -ItemType Directory -Path $dir2 -Force | Out-Null
+$t2 = (Get-Date).AddMinutes(-20)
+$ev2 = { param($sec, $body) "<Event><Timestamp data_type=`"4`">$(& $f $t2.AddSeconds($sec))</Timestamp><Computer-Name data_type=`"1`">NPS01</Computer-Name><Client-IP-Address data_type=`"3`">10.0.0.50</Client-IP-Address><Client-Friendly-Name data_type=`"1`">WLC-1</Client-Friendly-Name>$body</Event>" }
+$lines2 = @(
+  (& $ev2 0 '<User-Name data_type="1">CONTOSO\jan</User-Name><Calling-Station-Id data_type="1">AA-BB-CC-DD-EE-FF</Calling-Station-Id><NAS-Port-Type data_type="0">19</NAS-Port-Type><Class data_type="1">311 1 10.0.0.2 10/07/2026 08:00:00 1</Class><Packet-Type data_type="0">1</Packet-Type>')
+  (& $ev2 0 '<User-Name data_type="1">CONTOSO\ola</User-Name><Calling-Station-Id data_type="1">11-22-33-44-55-66</Calling-Station-Id><NAS-Port-Type data_type="0">19</NAS-Port-Type><Class data_type="1">311 1 10.0.0.2 10/07/2026 08:00:00 2</Class><Packet-Type data_type="0">1</Packet-Type>')
+  (& $ev2 1 '<Class data_type="1">311 1 10.0.0.2 10/07/2026 08:00:00 1</Class><Packet-Type data_type="0">3</Packet-Type><Reason-Code data_type="0">16</Reason-Code>')
+  (& $ev2 1 '<Class data_type="1">311 1 10.0.0.2 10/07/2026 08:00:00 2</Class><Packet-Type data_type="0">2</Packet-Type><Reason-Code data_type="0">0</Reason-Code>')
+  (& $ev2 9 '<User-Name data_type="1">CONTOSO\jan</User-Name><Calling-Station-Id data_type="1">AA-BB-CC-DD-EE-FF</Calling-Station-Id><Packet-Type data_type="0">4</Packet-Type><Acct-Status-Type data_type="0">2</Acct-Status-Type><Acct-Session-Time data_type="0">3725</Acct-Session-Time><Acct-Terminate-Cause data_type="0">2</Acct-Terminate-Cause><NAS-Port-Id data_type="1">GigabitEthernet1/0/12</NAS-Port-Id>')
+)
+Set-Content -Path (Join-Path $dir2 'IN2610.log') -Value $lines2 -Encoding UTF8
+$c2 = @(& $script:LogLoader @($dir2) 'IN*.log' ((Get-Date).AddHours(-1)) (Get-Date) 0 'Mac' 'AABBCCDDEEFF' $false | Where-Object { -not $_.PSObject.Properties['IsSummary'] })
+"CLASS entries: " + (($c2 | ForEach-Object { "$($_.Result)/$($_.User)/$($_.ReasonCode)/$($_.AcctTerminate)/$($_.NasPortId)" }) -join ' ; ')
+Check 'class pairing: reject belongs to jan' (@($c2 | Where-Object { $_.Result -eq 'Odmowa' }).Count -eq 1 -and @($c2 | Where-Object { $_.Result -eq 'Udzielono' }).Count -eq 0)
+Check 'acct terminate cause' (@($c2 | Where-Object { $_.AcctTerminate -like 'Lost-Carrier*' }).Count -eq 1)
+Check 'nas-port-id' (@($c2 | Where-Object { $_.NasPortId -eq 'GigabitEthernet1/0/12' }).Count -eq 1)
+$it2 = New-HistoryItem ($c2 | Where-Object { $_.AcctTerminate } | Select-Object -First 1) 'Log' $q
+Check 'history detail: session + cause' (($it2.Parts -join ' ') -like '*czas sesji 1 godz. 2 min*koniec sesji: Lost-Carrier*')
+Check 'vpn medium from ip' ((Get-EventMedium ([pscustomobject]@{ NasPortType = '-'; CalledStation = '198.51.100.10'; CallingStation = '203.0.113.45' })) -eq 'VPN')
+Check 'german wifi' ((Get-EventMedium ([pscustomobject]@{ NasPortType = 'Drahtlos - IEEE 802.11'; CalledStation = ''; CallingStation = '' })) -eq 'Wi-Fi')
+Check 'user abc.def is not a mac' (-not (Test-HistoryMatch ([pscustomobject]@{ User = 'abc.def'; MacHex = ''; UserFQ = ''; Sam = '' }) (New-HistoryQuery 'Mac' 'abcd' $false)))
 $ui.txtLogPath.Text = $dir
 $H3 = Show-HistoryWindow -Mode 'Mac' -Value 'AA-BB-CC-DD-EE-FF' -RangeIndex 2
 $H3.Ui.hSrcLog.IsChecked = $true
