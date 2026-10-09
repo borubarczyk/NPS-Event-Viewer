@@ -669,12 +669,12 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
             </WrapPanel>
           </Border>
 
-          <!-- TABELA + SZCZEGÓŁY (szerokość panelu szczegółów: przeciągnij separator) -->
-          <Grid Grid.Row="2">
+          <!-- TABELA + SZCZEGÓŁY (szerokość panelu szczegółów: Register-SidePanel, separator) -->
+          <Grid Grid.Row="2" Name="bodyEv">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="5*" MinWidth="360"/>
+              <ColumnDefinition Width="*" MinWidth="300"/>
               <ColumnDefinition Width="12"/>
-              <ColumnDefinition Width="2*" MinWidth="300"/>
+              <ColumnDefinition Width="400"/>
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Style="{StaticResource PanelCard}">
@@ -844,11 +844,11 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           </Border>
 
           <!-- TABELA + SZCZEGÓŁY -->
-          <Grid Grid.Row="2">
+          <Grid Grid.Row="2" Name="bodyLog">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="5*" MinWidth="360"/>
+              <ColumnDefinition Width="*" MinWidth="300"/>
               <ColumnDefinition Width="12"/>
-              <ColumnDefinition Width="2*" MinWidth="300"/>
+              <ColumnDefinition Width="400"/>
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Style="{StaticResource PanelCard}">
@@ -1002,11 +1002,11 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           </Border>
 
           <!-- TABELA + SZCZEGÓŁY -->
-          <Grid Grid.Row="2">
+          <Grid Grid.Row="2" Name="bodySys">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="5*" MinWidth="360"/>
+              <ColumnDefinition Width="*" MinWidth="300"/>
               <ColumnDefinition Width="12"/>
-              <ColumnDefinition Width="2*" MinWidth="300"/>
+              <ColumnDefinition Width="400"/>
             </Grid.ColumnDefinitions>
 
             <Border Grid.Column="0" Style="{StaticResource PanelCard}">
@@ -1094,11 +1094,32 @@ function Set-WindowFit($Window) {
 }
 Set-WindowFit $win
 
+# Panel szczegółów (prawa kolumna siatki) zajmuje stałą część szerokości - domyślnie Ratio, po
+# przeciągnięciu separatora tyle, ile ustawił użytkownik - ale nie mniej niż SideMin i nie tyle,
+# żeby tabela miała mniej niż MainMin. Liczone w kodzie, bo kolumny "*" z MinWidth w WPF nie
+# oddają miejsca sąsiedniej kolumnie i przy wąskim oknie panel wychodził poza ekran.
+function Register-SidePanel($Grid, [double]$Ratio, [double]$SideMin, [double]$MainMin) {
+    $Grid.Tag = @{ Ratio = $Ratio; SideMin = $SideMin; MainMin = $MainMin }
+    $Grid.Add_SizeChanged({ Update-SidePanel $this })
+    foreach ($c in $Grid.Children) {
+        if ($c -is [System.Windows.Controls.GridSplitter]) {
+            $c.Add_DragCompleted({ $g = $this.Parent; if ($g.ActualWidth -gt 0) { $g.Tag.Ratio = $g.ColumnDefinitions[2].ActualWidth / $g.ActualWidth }; Update-SidePanel $g })
+        }
+    }
+}
+function Update-SidePanel($Grid) {
+    $s = $Grid.Tag; $w = $Grid.ActualWidth
+    if (-not $s -or $w -le 0) { return }
+    $px = [Math]::Max($s.SideMin, [Math]::Min([Math]::Round($s.Ratio * $w), $w - 12 - $s.MainMin))
+    $Grid.ColumnDefinitions[2].Width = New-Object System.Windows.GridLength($px)
+}
+foreach ($body in 'bodyEv', 'bodyLog', 'bodySys') { Register-SidePanel $ui[$body] 0.29 300 300 }
+
 # Statystyki widoku zajmują najwyżej ~40% wysokości panelu, a w niskim panelu są chowane -
 # miejsce zostaje dla szczegółów zaznaczonego zdarzenia. W niskim oknie znika też podtytuł.
 foreach ($side in 'sideEv', 'sideLog', 'sideSys') {
     $ui[$side].Add_SizeChanged({
-            $vis = $(if ($this.ActualHeight -lt 300) { 'Collapsed' } else { 'Visible' })
+            $vis = $(if ($this.ActualHeight -lt 360) { 'Collapsed' } else { 'Visible' })
             foreach ($c in $this.Children) {
                 if ([System.Windows.Controls.Grid]::GetRow($c) -ge 2) { $c.Visibility = $vis }
                 if ($c -is [System.Windows.Controls.Border]) { $c.MaxHeight = [Math]::Max(60, [Math]::Min(240, [Math]::Floor($this.ActualHeight * 0.4))) }
@@ -2499,12 +2520,12 @@ $script:HistXaml = @'
       </ScrollViewer>
     </Border>
 
-    <!-- OŚ CZASU + SZCZEGÓŁY (szerokość panelu szczegółów: przeciągnij separator) -->
-    <Grid Grid.Row="3">
+    <!-- OŚ CZASU + SZCZEGÓŁY (szerokość panelu szczegółów: Register-SidePanel, separator) -->
+    <Grid Grid.Row="3" Name="hBody">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="2*" MinWidth="420"/>
+        <ColumnDefinition Width="*" MinWidth="360"/>
         <ColumnDefinition Width="12"/>
-        <ColumnDefinition Width="*" MinWidth="280"/>
+        <ColumnDefinition Width="380"/>
       </Grid.ColumnDefinitions>
 
       <Border Grid.Column="0" Style="{StaticResource PanelCard}">
@@ -3576,6 +3597,7 @@ function Show-HistoryWindow {
     $u.hZoomClear.Add_Click({ Set-HistoryZoom $script:HistWins[[int]$this.Tag] $null $null })
     $u.hStrip.Add_MouseLeftButtonUp({ Select-HistoryBucket $script:HistWins[[int]$this.Tag] $_.GetPosition($this).X })
     $u.hStripHost.Add_SizeChanged({ Update-HistoryStrip $script:HistWins[[int]$this.Tag] })
+    Register-SidePanel $u.hBody 0.32 280 360
     # Podsumowanie i powiązane zajmują najwyżej ~30% wysokości okna (dalej przewijane) - na niskim
     # ekranie zostaje miejsce na oś czasu i szczegóły.
     $hw.Add_SizeChanged({ $hh = $script:HistWins[[int]$this.Tag]; if ($hh) { $hh.Ui.hSummary.MaxHeight = [Math]::Max(90, [Math]::Floor($this.ActualHeight * 0.3)) } })

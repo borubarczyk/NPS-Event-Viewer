@@ -95,12 +95,11 @@ Save-Png $win '01-okno-glowne'
 $wa = [System.Windows.SystemParameters]::WorkArea
 Check 'main window fits work area' ($win.Width -le $wa.Width -and $win.Height -le $wa.Height)
 # Mały ekran: panel szczegółów i pasek statusu muszą być widoczne także przy minimalnym rozmiarze okna
-# (statystyki widoku chowają się w niskim panelu, żeby zostało miejsce na szczegóły)
+# (statystyki widoku chowają się w niskim panelu, żeby zostało miejsce na szczegóły). Ekran runnera
+# CI ma 1024x720, więc większe okno system i tak przytnie do ekranu.
 $script:Ctx.Ev.Grid.SelectedIndex = 4; Invoke-Pump 200
-$win.Width = 1560; $win.Height = 900; Invoke-Pump 300
-Check 'stats visible at 1560x900' (Test-InWindow $win $ui.bdStats 40)
-Check 'details visible at 1560x900' (Test-InWindow $win $ui.txtDetails 200)
-foreach ($size in @(@(1280, 720, 200), @([int]$win.MinWidth, [int]$win.MinHeight, 60))) {
+Check 'details visible at start size' (Test-InWindow $win $ui.txtDetails 150)
+foreach ($size in @(@(1000, 700, 150), @([int]$win.MinWidth, [int]$win.MinHeight, 60))) {
     $win.Width = $size[0]; $win.Height = $size[1]; Invoke-Pump 300
     $tag = "$($size[0])x$($size[1])"
     Check "details visible at $tag" (Test-InWindow $win $ui.txtDetails $size[2])
