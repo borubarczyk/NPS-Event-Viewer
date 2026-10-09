@@ -62,9 +62,11 @@ function Find-Clipping($Window, [string]$Name) {
 function Test-InWindow($Window, $Element, [double]$MinH = 0) {
     $Window.UpdateLayout()
     $root = [System.Windows.Media.VisualTreeHelper]::GetChild($Window, 0)
-    if (-not $Element.IsVisible -or $Element.ActualHeight -lt $MinH) { return $false }
+    if (-not $Element.IsVisible) { Write-Host "     $($Element.Name): niewidoczny"; return $false }
     $br = $Element.TransformToAncestor($root).Transform((New-Object System.Windows.Point($Element.ActualWidth, $Element.ActualHeight)))
-    return ($br.X -le $root.ActualWidth + 0.5 -and $br.Y -le $root.ActualHeight + 0.5)
+    $ok = ($Element.ActualHeight -ge $MinH -and $br.X -le $root.ActualWidth + 0.5 -and $br.Y -le $root.ActualHeight + 0.5)
+    if (-not $ok) { Write-Host "     $($Element.Name): $([int]$Element.ActualWidth) x $([int]$Element.ActualHeight) (min. wys. $MinH), prawy dolny róg $([int]$br.X),$([int]$br.Y), okno $([int]$root.ActualWidth) x $([int]$root.ActualHeight)" }
+    return $ok
 }
 
 $fail = 0

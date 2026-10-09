@@ -2429,11 +2429,11 @@ $script:HistXaml = @'
             <ComboBoxItem Content="Komputer"/>
           </ComboBox>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" Width="220">
+        <StackPanel Style="{StaticResource FieldBox}" Width="200">
           <TextBlock Text="WARTOŚĆ (MAC w dowolnym formacie)" Style="{StaticResource Caption}"/>
           <TextBox Name="hValue" FontFamily="Consolas"/>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" Width="210">
+        <StackPanel Style="{StaticResource FieldBox}" Width="200">
           <TextBlock Text="ZAKRES CZASU" Style="{StaticResource Caption}"/>
           <ComboBox Name="hRange" SelectedIndex="0">
             <ComboBoxItem Content="Dane wczytane w zakładkach"/>
@@ -2479,6 +2479,7 @@ $script:HistXaml = @'
 
     <!-- PODSUMOWANIE + PASEK AKTYWNOŚCI + POWIĄZANE -->
     <Border Grid.Row="2" Style="{StaticResource CardBox}" Padding="14,12,14,6">
+      <ScrollViewer Name="hSummary" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
       <StackPanel>
         <WrapPanel Name="hChips"/>
         <DockPanel Margin="0,2,0,0">
@@ -2495,6 +2496,7 @@ $script:HistXaml = @'
         </DockPanel>
         <StackPanel Name="hRelated"/>
       </StackPanel>
+      </ScrollViewer>
     </Border>
 
     <!-- OŚ CZASU + SZCZEGÓŁY (szerokość panelu szczegółów: przeciągnij separator) -->
@@ -3574,6 +3576,9 @@ function Show-HistoryWindow {
     $u.hZoomClear.Add_Click({ Set-HistoryZoom $script:HistWins[[int]$this.Tag] $null $null })
     $u.hStrip.Add_MouseLeftButtonUp({ Select-HistoryBucket $script:HistWins[[int]$this.Tag] $_.GetPosition($this).X })
     $u.hStripHost.Add_SizeChanged({ Update-HistoryStrip $script:HistWins[[int]$this.Tag] })
+    # Podsumowanie i powiązane zajmują najwyżej ~30% wysokości okna (dalej przewijane) - na niskim
+    # ekranie zostaje miejsce na oś czasu i szczegóły.
+    $hw.Add_SizeChanged({ $hh = $script:HistWins[[int]$this.Tag]; if ($hh) { $hh.Ui.hSummary.MaxHeight = [Math]::Max(90, [Math]::Floor($this.ActualHeight * 0.3)) } })
     $u.hCopy.Add_Click({ $hh = $script:HistWins[[int]$this.Tag]; if ($hh.Ui.hDetails.Text) { [System.Windows.Clipboard]::SetText($hh.Ui.hDetails.Text) } })
     $u.hCopyAll.Add_Click({ $hh = $script:HistWins[[int]$this.Tag]; $t = Get-HistoryText $hh; if ($t) { [System.Windows.Clipboard]::SetText($t); Set-HistoryStatus $hh 'Skopiowano oś czasu do schowka.' 'OK' } })
     $u.hExport.Add_Click({ Export-History $script:HistWins[[int]$this.Tag] })
