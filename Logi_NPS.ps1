@@ -41,51 +41,134 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="NPS Event Viewer" Height="900" Width="1560" MinHeight="700" MinWidth="1200"
+        Title="NPS Event Viewer" Height="900" Width="1560" MinHeight="600" MinWidth="960"
         WindowStartupLocation="CenterScreen" Background="#15161C"
         FontFamily="Segoe UI" FontSize="13">
   <Window.Resources>
+    <!-- Paleta -->
     <SolidColorBrush x:Key="Card"   Color="#1E2029"/>
     <SolidColorBrush x:Key="Field"  Color="#272A36"/>
+    <SolidColorBrush x:Key="Hover"  Color="#2B2E3B"/>
     <SolidColorBrush x:Key="Line"   Color="#343847"/>
     <SolidColorBrush x:Key="Accent" Color="#4F8CFF"/>
     <SolidColorBrush x:Key="Text"   Color="#E8EAF0"/>
     <SolidColorBrush x:Key="Muted"  Color="#8A90A2"/>
 
+    <!-- Skala typografii: tytuł 20, karta 14, tekst 13, drobny / monospace 12, etykieta 11.
+         Wysokość pól, list i przycisków: 28 (małe przyciski 24). Odstępy: 4 / 8 / 12 / 16. -->
     <Style TargetType="TextBlock">
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
+    </Style>
+    <Style x:Key="PageTitle" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Text}"/>
+      <Setter Property="FontSize" Value="20"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+    </Style>
+    <Style x:Key="PageSubtitle" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Margin" Value="0,2,0,0"/>
+      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
     </Style>
     <Style x:Key="Caption" TargetType="TextBlock">
       <Setter Property="Foreground" Value="{StaticResource Muted}"/>
       <Setter Property="FontSize" Value="11"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
-      <Setter Property="Margin" Value="0,0,0,5"/>
+      <Setter Property="Margin" Value="0,0,0,4"/>
+      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
     </Style>
     <Style x:Key="CardTitle" TargetType="TextBlock">
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
-      <Setter Property="FontSize" Value="15"/>
+      <Setter Property="FontSize" Value="14"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
     </Style>
-    <Style x:Key="FieldBox" TargetType="StackPanel">
-      <Setter Property="Margin" Value="0,0,12,10"/>
+    <Style x:Key="Counts" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="{StaticResource Muted}"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
     </Style>
 
+    <!-- Karty i układ -->
+    <Style x:Key="CardBox" TargetType="Border">
+      <Setter Property="Background" Value="{StaticResource Card}"/>
+      <Setter Property="CornerRadius" Value="8"/>
+      <Setter Property="Padding" Value="14,12"/>
+      <Setter Property="Margin" Value="0,0,0,12"/>
+    </Style>
+    <!-- Karta z polami w WrapPanel: dolny odstęp pól (8) + padding (4) = 12, tyle co u góry -->
+    <Style x:Key="FormCard" TargetType="Border" BasedOn="{StaticResource CardBox}">
+      <Setter Property="Padding" Value="14,12,14,4"/>
+    </Style>
+    <Style x:Key="PanelCard" TargetType="Border" BasedOn="{StaticResource CardBox}">
+      <Setter Property="Margin" Value="0"/>
+    </Style>
+    <Style x:Key="CardHeader" TargetType="DockPanel">
+      <Setter Property="Margin" Value="0,0,0,8"/>
+      <Setter Property="MinHeight" Value="24"/>
+      <Setter Property="LastChildFill" Value="True"/>
+    </Style>
+    <!-- Pole formularza: etykieta + kontrolka; wszystkie pola mają tę samą wysokość -->
+    <Style x:Key="FieldBox" TargetType="StackPanel">
+      <Setter Property="Margin" Value="0,0,12,8"/>
+      <Setter Property="VerticalAlignment" Value="Bottom"/>
+    </Style>
+    <!-- Wiersz pól wyboru / przycisków o wysokości kontrolki (28) - wyrównany z polami tekstowymi -->
+    <Style x:Key="InlineRow" TargetType="StackPanel">
+      <Setter Property="Orientation" Value="Horizontal"/>
+      <Setter Property="Height" Value="28"/>
+    </Style>
+    <Style x:Key="Splitter" TargetType="GridSplitter">
+      <Setter Property="Width" Value="12"/>
+      <Setter Property="HorizontalAlignment" Value="Stretch"/>
+      <Setter Property="VerticalAlignment" Value="Stretch"/>
+      <Setter Property="ResizeBehavior" Value="PreviousAndNext"/>
+      <Setter Property="ResizeDirection" Value="Columns"/>
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="Cursor" Value="SizeWE"/>
+      <Setter Property="ToolTip" Value="Przeciągnij, aby zmienić szerokość panelu"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="GridSplitter">
+            <Grid Background="Transparent">
+              <Rectangle x:Name="grip" Width="2" Height="40" RadiusX="1" RadiusY="1" Fill="{StaticResource Line}"
+                         HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="grip" Property="Fill" Value="{StaticResource Accent}"/>
+                <Setter TargetName="grip" Property="Height" Value="64"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!-- Przyciski -->
     <Style x:Key="Btn" TargetType="Button">
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
       <Setter Property="Background" Value="#2C3040"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
-      <Setter Property="Padding" Value="14,7"/>
+      <Setter Property="Padding" Value="12,0"/>
+      <Setter Property="MinHeight" Value="28"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="Button">
             <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                    BorderThickness="1" CornerRadius="6" Padding="{TemplateBinding Padding}">
+                    BorderThickness="1" CornerRadius="6" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
               <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
               <Trigger Property="IsMouseOver" Value="True">
                 <Setter TargetName="b" Property="Opacity" Value="0.85"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/>
               </Trigger>
               <Trigger Property="IsEnabled" Value="False">
                 <Setter TargetName="b" Property="Opacity" Value="0.4"/>
@@ -100,22 +183,36 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
       <Setter Property="BorderBrush" Value="{StaticResource Accent}"/>
       <Setter Property="Foreground" Value="White"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Padding" Value="16,0"/>
+    </Style>
+    <Style x:Key="BtnSmall" TargetType="Button" BasedOn="{StaticResource Btn}">
+      <Setter Property="Padding" Value="10,0"/>
+      <Setter Property="MinHeight" Value="24"/>
+      <Setter Property="FontSize" Value="12"/>
     </Style>
 
+    <!-- Pola tekstowe: jedna linia = 28 px; pole wielowierszowe (szczegóły) ustawia własny Padding -->
     <Style TargetType="TextBox">
       <Setter Property="Background" Value="{StaticResource Field}"/>
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
       <Setter Property="CaretBrush" Value="{StaticResource Text}"/>
-      <Setter Property="Padding" Value="8,6"/>
+      <Setter Property="SelectionBrush" Value="{StaticResource Accent}"/>
+      <Setter Property="Padding" Value="6,0"/>
+      <Setter Property="MinHeight" Value="28"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TextBox">
             <Border x:Name="b" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
-                    BorderThickness="1" CornerRadius="6">
-              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+                    BorderThickness="1" CornerRadius="6" SnapsToDevicePixels="True">
+              <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
+                            VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
             </Border>
             <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="b" Property="BorderBrush" Value="#4A5068"/>
+              </Trigger>
               <Trigger Property="IsKeyboardFocused" Value="True">
                 <Setter TargetName="b" Property="BorderBrush" Value="{StaticResource Accent}"/>
               </Trigger>
@@ -127,10 +224,20 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
         </Setter.Value>
       </Setter>
     </Style>
+    <Style x:Key="DetailsBox" TargetType="TextBox" BasedOn="{StaticResource {x:Type TextBox}}">
+      <Setter Property="IsReadOnly" Value="True"/>
+      <Setter Property="TextWrapping" Value="Wrap"/>
+      <Setter Property="AcceptsReturn" Value="True"/>
+      <Setter Property="VerticalScrollBarVisibility" Value="Auto"/>
+      <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+      <Setter Property="FontFamily" Value="Consolas"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="8,6"/>
+    </Style>
 
     <Style TargetType="ComboBox">
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
-      <Setter Property="MinHeight" Value="32"/>
+      <Setter Property="MinHeight" Value="28"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ComboBox">
@@ -139,24 +246,27 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                             IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
                 <ToggleButton.Template>
                   <ControlTemplate TargetType="ToggleButton">
-                    <Border x:Name="bd" Background="#272A36" BorderBrush="#343847" BorderThickness="1" CornerRadius="6">
+                    <Border x:Name="bd" Background="#272A36" BorderBrush="#343847" BorderThickness="1" CornerRadius="6" SnapsToDevicePixels="True">
                       <Path HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,10,0"
                             Data="M 0 0 L 4 4 L 8 0" Stroke="#8A90A2" StrokeThickness="1.6"/>
                     </Border>
                     <ControlTemplate.Triggers>
                       <Trigger Property="IsMouseOver" Value="True">
+                        <Setter TargetName="bd" Property="BorderBrush" Value="#4A5068"/>
+                      </Trigger>
+                      <Trigger Property="IsChecked" Value="True">
                         <Setter TargetName="bd" Property="BorderBrush" Value="#4F8CFF"/>
                       </Trigger>
                     </ControlTemplate.Triggers>
                   </ControlTemplate>
                 </ToggleButton.Template>
               </ToggleButton>
-              <ContentPresenter IsHitTestVisible="False" Margin="10,0,28,0" VerticalAlignment="Center"
+              <ContentPresenter IsHitTestVisible="False" Margin="8,0,26,0" VerticalAlignment="Center"
                                 Content="{TemplateBinding SelectionBoxItem}"
                                 ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"/>
               <Popup IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True"
                      Focusable="False" PopupAnimation="Slide">
-                <Border Background="#272A36" BorderBrush="#343847" BorderThickness="1" CornerRadius="6" Margin="0,2,0,0"
+                <Border Background="#272A36" BorderBrush="#343847" BorderThickness="1" CornerRadius="6" Margin="0,2,0,0" Padding="0,4"
                         MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}" MaxHeight="360">
                   <ScrollViewer>
                     <StackPanel IsItemsHost="True"/>
@@ -164,13 +274,18 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                 </Border>
               </Popup>
             </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
           </ControlTemplate>
         </Setter.Value>
       </Setter>
     </Style>
     <Style TargetType="ComboBoxItem">
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
-      <Setter Property="Padding" Value="10,6"/>
+      <Setter Property="Padding" Value="8,5"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ComboBoxItem">
@@ -190,9 +305,46 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
       </Setter>
     </Style>
 
+    <!-- Pole wyboru w ciemnym motywie (domyślne jest jasne i odstaje od reszty) -->
     <Style TargetType="CheckBox">
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
-      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="VerticalAlignment" Value="Center"/>
+      <Setter Property="Margin" Value="0,0,16,0"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <Grid Background="Transparent">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Border x:Name="box" Width="16" Height="16" CornerRadius="4" BorderThickness="1" VerticalAlignment="Center"
+                      Background="{StaticResource Field}" BorderBrush="#4A5068" SnapsToDevicePixels="True">
+                <Path x:Name="mark" Data="M 3 8 L 6.5 11.5 L 13 4.5" Stroke="White" StrokeThickness="2"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Visibility="Collapsed"/>
+              </Border>
+              <ContentPresenter Grid.Column="1" Margin="8,0,0,0" VerticalAlignment="Center" RecognizesAccessKey="True"/>
+            </Grid>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="box" Property="Background" Value="{StaticResource Accent}"/>
+                <Setter TargetName="box" Property="BorderBrush" Value="{StaticResource Accent}"/>
+                <Setter TargetName="mark" Property="Visibility" Value="Visible"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <Style TargetType="TabControl">
@@ -218,14 +370,14 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
     </Style>
     <Style TargetType="TabItem">
       <Setter Property="Foreground" Value="{StaticResource Muted}"/>
-      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="FontSize" Value="13"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Cursor" Value="Hand"/>
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="TabItem">
             <Border x:Name="bd" Background="Transparent" BorderBrush="Transparent" BorderThickness="0,0,0,2"
-                    Padding="16,8" Margin="0,0,6,-1">
+                    Padding="14,8" Margin="0,0,4,-1">
               <ContentPresenter ContentSource="Header" HorizontalAlignment="Center" VerticalAlignment="Center"/>
             </Border>
             <ControlTemplate.Triggers>
@@ -246,6 +398,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
       <Setter Property="Background" Value="{StaticResource Field}"/>
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
+      <Setter Property="BorderThickness" Value="1"/>
       <Setter Property="RowBackground" Value="#272A36"/>
       <Setter Property="AlternatingRowBackground" Value="#2B2E3B"/>
       <Setter Property="GridLinesVisibility" Value="None"/>
@@ -253,21 +406,34 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
       <Setter Property="AutoGenerateColumns" Value="False"/>
       <Setter Property="CanUserAddRows" Value="False"/>
       <Setter Property="IsReadOnly" Value="True"/>
-      <Setter Property="RowHeight" Value="27"/>
+      <Setter Property="RowHeight" Value="28"/>
       <Setter Property="SelectionMode" Value="Single"/>
       <Setter Property="EnableRowVirtualization" Value="True"/>
     </Style>
+    <!-- Nagłówek i komórka mają ten sam lewy odstęp (6), więc tekst kolumn jest wyrównany z nagłówkiem -->
     <Style TargetType="DataGridColumnHeader">
       <Setter Property="Background" Value="#1E2029"/>
       <Setter Property="Foreground" Value="{StaticResource Muted}"/>
-      <Setter Property="Padding" Value="8,6"/>
+      <Setter Property="FontSize" Value="12"/>
+      <Setter Property="Padding" Value="6,6"/>
       <Setter Property="BorderBrush" Value="{StaticResource Line}"/>
       <Setter Property="BorderThickness" Value="0,0,0,1"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
     </Style>
     <Style TargetType="DataGridCell">
       <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Foreground" Value="{StaticResource Text}"/>
+      <Setter Property="Padding" Value="6,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="DataGridCell">
+            <Border Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <ContentPresenter VerticalAlignment="Center"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
       <Style.Triggers>
         <Trigger Property="IsSelected" Value="True">
           <Setter Property="Background" Value="#33405E"/>
@@ -299,9 +465,90 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
       <Setter Property="Background" Value="{StaticResource Field}"/>
       <Setter Property="BorderThickness" Value="0"/>
     </Style>
+
+    <!-- Pasek przewijania w ciemnym motywie: cienki, bez strzałek -->
+    <Style x:Key="ScrollThumb" TargetType="Thumb">
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Thumb">
+            <Border x:Name="t" Background="#4A5068" CornerRadius="4"/>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="t" Property="Background" Value="#5E6584"/>
+              </Trigger>
+              <Trigger Property="IsDragging" Value="True">
+                <Setter TargetName="t" Property="Background" Value="{StaticResource Accent}"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="ScrollPage" TargetType="RepeatButton">
+      <Setter Property="Focusable" Value="False"/>
+      <Setter Property="IsTabStop" Value="False"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RepeatButton">
+            <Border Background="Transparent"/>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Width" Value="10"/>
+      <Setter Property="MinWidth" Value="10"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Border Background="{TemplateBinding Background}" Padding="2">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.DecreaseRepeatButton>
+                  <RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageUpCommand"/>
+                </Track.DecreaseRepeatButton>
+                <Track.Thumb>
+                  <Thumb Style="{StaticResource ScrollThumb}" MinHeight="24"/>
+                </Track.Thumb>
+                <Track.IncreaseRepeatButton>
+                  <RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageDownCommand"/>
+                </Track.IncreaseRepeatButton>
+              </Track>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+      <Style.Triggers>
+        <Trigger Property="Orientation" Value="Horizontal">
+          <Setter Property="Width" Value="Auto"/>
+          <Setter Property="MinWidth" Value="0"/>
+          <Setter Property="Height" Value="10"/>
+          <Setter Property="MinHeight" Value="10"/>
+          <Setter Property="Template">
+            <Setter.Value>
+              <ControlTemplate TargetType="ScrollBar">
+                <Border Background="{TemplateBinding Background}" Padding="2">
+                  <Track x:Name="PART_Track" IsDirectionReversed="False">
+                    <Track.DecreaseRepeatButton>
+                      <RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageLeftCommand"/>
+                    </Track.DecreaseRepeatButton>
+                    <Track.Thumb>
+                      <Thumb Style="{StaticResource ScrollThumb}" MinWidth="24"/>
+                    </Track.Thumb>
+                    <Track.IncreaseRepeatButton>
+                      <RepeatButton Style="{StaticResource ScrollPage}" Command="ScrollBar.PageRightCommand"/>
+                    </Track.IncreaseRepeatButton>
+                  </Track>
+                </Border>
+              </ControlTemplate>
+            </Setter.Value>
+          </Setter>
+        </Trigger>
+      </Style.Triggers>
+    </Style>
   </Window.Resources>
 
-  <Grid Margin="18">
+  <Grid Margin="16">
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/>
       <RowDefinition Height="*"/>
@@ -309,19 +556,19 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
     </Grid.RowDefinitions>
 
     <!-- NAGŁÓWEK -->
-    <DockPanel Grid.Row="0" Margin="0,0,0,10">
-      <Border DockPanel.Dock="Right" Background="{StaticResource Card}" CornerRadius="14" Padding="12,6" VerticalAlignment="Center">
-        <StackPanel Orientation="Horizontal">
-          <Ellipse Name="dotState" Width="9" Height="9" Fill="#8A90A2" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <TextBlock Name="lblState" Text="Brak danych" Foreground="{StaticResource Muted}"/>
+    <DockPanel Grid.Row="0" Margin="0,0,0,12">
+      <Border DockPanel.Dock="Right" Background="{StaticResource Card}" CornerRadius="14" Padding="12,0" Height="28" VerticalAlignment="Center">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Ellipse Name="dotState" Width="8" Height="8" Fill="#8A90A2" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock Name="lblState" Text="Brak danych" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
         </StackPanel>
       </Border>
-      <Button Name="btnHistory" DockPanel.Dock="Right" Content="Historia urządzenia / użytkownika..." Style="{StaticResource Btn}" Margin="0,0,12,0" VerticalAlignment="Center"
+      <Button Name="btnHistory" DockPanel.Dock="Right" Content="Historia urządzenia / użytkownika..." Style="{StaticResource Btn}" Margin="0,0,12,0"
               ToolTip="Oś czasu wszystkich zdarzeń jednego MAC, użytkownika albo komputera (też: dwuklik na wierszu tabeli)"/>
-      <StackPanel>
-        <TextBlock Text="NPS Event Viewer" FontSize="24" FontWeight="SemiBold"/>
-        <TextBlock Text="Zdarzenia autoryzacji Network Policy Server - dziennik Security (6272-6280), pliki logów RADIUS (.log) i zdarzenia systemowe"
-                   Foreground="{StaticResource Muted}" Margin="0,2,0,0"/>
+      <StackPanel Margin="0,0,16,0" VerticalAlignment="Center">
+        <TextBlock Text="NPS Event Viewer" Style="{StaticResource PageTitle}"/>
+        <TextBlock Name="lblSubtitle" Text="Zdarzenia autoryzacji Network Policy Server - dziennik Security (6272-6280), pliki logów RADIUS (.log) i zdarzenia systemowe"
+                   Style="{StaticResource PageSubtitle}"/>
       </StackPanel>
     </DockPanel>
 
@@ -337,9 +584,9 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           </Grid.RowDefinitions>
 
           <!-- ZAPYTANIE -->
-          <Border Grid.Row="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+          <Border Grid.Row="0" Style="{StaticResource FormCard}">
             <WrapPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="200">
+              <StackPanel Style="{StaticResource FieldBox}" Width="190">
                 <TextBlock Text="SERWER NPS (puste = lokalny)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtServer"/>
               </StackPanel>
@@ -353,31 +600,35 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                   <ComboBoxItem Content="Własny zakres"/>
                 </ComboBox>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="150">
+              <StackPanel Style="{StaticResource FieldBox}" Width="140">
                 <TextBlock Text="OD (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtFrom" FontFamily="Consolas" IsEnabled="False"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="150">
+              <StackPanel Style="{StaticResource FieldBox}" Width="140">
                 <TextBlock Text="DO (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtTo" FontFamily="Consolas" IsEnabled="False"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="110">
+              <StackPanel Style="{StaticResource FieldBox}" Width="100">
                 <TextBlock Text="MAKS. ZDARZEŃ" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtMax" Text="5000" FontFamily="Consolas"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Margin="4,0,16,17">
-                <CheckBox Name="chkAuto" Content="Auto-odświeżanie co 60 s"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <CheckBox Name="chkAuto" Content="Auto-odświeżanie co 60 s" Margin="0"/>
+                </StackPanel>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-                <Button Name="btnLoad" Content="Wczytaj zdarzenia" Style="{StaticResource BtnPrimary}" Padding="20,8"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <Button Name="btnLoad" Content="Wczytaj zdarzenia" Style="{StaticResource BtnPrimary}"/>
+                </StackPanel>
               </StackPanel>
             </WrapPanel>
           </Border>
 
           <!-- FILTRY -->
-          <Border Grid.Row="1" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+          <Border Grid.Row="1" Style="{StaticResource FormCard}">
             <WrapPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="140">
+              <StackPanel Style="{StaticResource FieldBox}" Width="120">
                 <TextBlock Text="WYNIK" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbResult" SelectedIndex="0">
                   <ComboBoxItem Content="Wszystkie"/>
@@ -386,90 +637,93 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                   <ComboBoxItem Content="Inne"/>
                 </ComboBox>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="210">
+              <StackPanel Style="{StaticResource FieldBox}" Width="170">
                 <TextBlock Text="SWITCH (KLIENT RADIUS)" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbSwitch"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="230">
+              <StackPanel Style="{StaticResource FieldBox}" Width="180">
                 <TextBlock Text="ZASADA SIECIOWA" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbPolicy"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="140">
+              <StackPanel Style="{StaticResource FieldBox}" Width="130">
                 <TextBlock Text="UWIERZYTELNIANIE" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbAuth"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="190">
+              <StackPanel Style="{StaticResource FieldBox}" Width="160">
                 <TextBlock Text="UŻYTKOWNIK / MAC" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtUser" FontFamily="Consolas"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="170">
+              <StackPanel Style="{StaticResource FieldBox}" Width="130">
                 <TextBlock Text="KOMPUTER" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtComputer"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="220">
+              <StackPanel Style="{StaticResource FieldBox}" Width="170">
                 <TextBlock Text="SZUKAJ WSZĘDZIE" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtSearch"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-                <Button Name="btnResetFilters" Content="Wyczyść filtry" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-                <Button Name="btnExport" Content="Eksport CSV" Style="{StaticResource Btn}"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <Button Name="btnResetFilters" Content="Wyczyść filtry" Style="{StaticResource Btn}"/>
+                </StackPanel>
               </StackPanel>
             </WrapPanel>
           </Border>
 
-          <!-- TABELA + SZCZEGÓŁY -->
+          <!-- TABELA + SZCZEGÓŁY (szerokość panelu szczegółów: przeciągnij separator) -->
           <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="14"/>
-              <ColumnDefinition Width="430"/>
+              <ColumnDefinition Width="5*" MinWidth="360"/>
+              <ColumnDefinition Width="12"/>
+              <ColumnDefinition Width="2*" MinWidth="300"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
+            <Border Grid.Column="0" Style="{StaticResource PanelCard}">
               <Grid>
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                  <TextBlock Name="lblCounts" DockPanel.Dock="Right" Text="" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
-                  <TextBlock Text="Zdarzenia" Style="{StaticResource CardTitle}"/>
+                <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+                  <Button Name="btnExport" DockPanel.Dock="Right" Content="Eksport CSV" Style="{StaticResource BtnSmall}" Margin="12,0,0,0"
+                          ToolTip="Zapisz zdarzenia widoczne w tabeli (po filtrach) do pliku CSV"/>
+                  <TextBlock Text="Zdarzenia" Style="{StaticResource CardTitle}" DockPanel.Dock="Left" Margin="0,0,12,0"/>
+                  <TextBlock Name="lblCounts" Text="" Style="{StaticResource Counts}" HorizontalAlignment="Right"/>
                 </DockPanel>
                 <DataGrid Name="dgEvents" Grid.Row="1">
                   <DataGrid.Columns>
-                    <DataGridTextColumn Header="Czas" Binding="{Binding TimeStr}" Width="145" FontFamily="Consolas"/>
+                    <DataGridTextColumn Header="Czas" Binding="{Binding TimeStr}" Width="155" FontFamily="Consolas"/>
                     <DataGridTextColumn Header="Wynik" Binding="{Binding Result}" Width="95" ElementStyle="{StaticResource ResultCell}"/>
                     <DataGridTextColumn Header="Użytkownik" Binding="{Binding User}" Width="150"/>
-                    <DataGridTextColumn Header="MAC klienta" Binding="{Binding CallingStation}" Width="140" FontFamily="Consolas"/>
+                    <DataGridTextColumn Header="MAC klienta" Binding="{Binding CallingStation}" Width="145" FontFamily="Consolas"/>
                     <DataGridTextColumn Header="Komputer" Binding="{Binding Machine}" Width="150"/>
                     <DataGridTextColumn Header="Switch" Binding="{Binding Client}" Width="160"/>
-                    <DataGridTextColumn Header="Port" Binding="{Binding NasPort}" Width="50"/>
+                    <DataGridTextColumn Header="Port" Binding="{Binding NasPort}" Width="55"/>
                     <DataGridTextColumn Header="Zasada sieciowa" Binding="{Binding Policy}" Width="180"/>
-                    <DataGridTextColumn Header="Uwierz." Binding="{Binding AuthType}" Width="70"/>
-                    <DataGridTextColumn Header="Kod" Binding="{Binding ReasonCode}" Width="45"/>
-                    <DataGridTextColumn Header="Przyczyna" Binding="{Binding Reason}" Width="*"/>
+                    <DataGridTextColumn Header="Uwierz." Binding="{Binding AuthType}" Width="75"/>
+                    <DataGridTextColumn Header="Kod" Binding="{Binding ReasonCode}" Width="50"/>
+                    <DataGridTextColumn Header="Przyczyna" Binding="{Binding Reason}" Width="*" MinWidth="160"/>
                   </DataGrid.Columns>
                 </DataGrid>
               </Grid>
             </Border>
 
-            <Border Grid.Column="2" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
-              <Grid>
+            <GridSplitter Grid.Column="1" Style="{StaticResource Splitter}"/>
+
+            <Border Grid.Column="2" Style="{StaticResource PanelCard}">
+              <Grid Name="sideEv">
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="*"/>
+                  <RowDefinition Height="*" MinHeight="90"/>
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                  <Button Name="btnCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource Btn}" Padding="12,4"/>
-                  <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+                <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+                  <Button Name="btnCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource BtnSmall}"/>
+                  <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}"/>
                 </DockPanel>
-                <TextBox Name="txtDetails" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"
-                         Text="Zaznacz zdarzenie na liście."/>
-                <TextBlock Grid.Row="2" Text="Statystyki widoku" Style="{StaticResource CardTitle}" Margin="0,14,0,8"/>
-                <Border Grid.Row="3" Background="{StaticResource Field}" CornerRadius="6" Padding="10" MaxHeight="260">
+                <TextBox Name="txtDetails" Grid.Row="1" Style="{StaticResource DetailsBox}" Text="Zaznacz zdarzenie na liście."/>
+                <TextBlock Grid.Row="2" Text="Statystyki widoku" Style="{StaticResource CardTitle}" Margin="0,12,0,8"/>
+                <Border Name="bdStats" Grid.Row="3" Background="{StaticResource Field}" CornerRadius="6" Padding="8,6" MaxHeight="240">
                   <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <TextBlock Name="txtStats" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Text="-"/>
                   </ScrollViewer>
@@ -490,16 +744,18 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           </Grid.RowDefinitions>
 
           <!-- ŹRÓDŁO -->
-          <Border Grid.Row="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+          <Border Grid.Row="0" Style="{StaticResource FormCard}">
             <WrapPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="420">
+              <StackPanel Style="{StaticResource FieldBox}" Width="380">
                 <TextBlock Text="LOKALIZACJA (folder, plik lub UNC; kilka ścieżek rozdziel ;)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtLogPath" FontFamily="Consolas"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-                <Button Name="btnLogFolder" Content="Folder..." Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-                <Button Name="btnLogFiles" Content="Pliki..." Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-                <Button Name="btnLogDefault" Content="Domyślna" Style="{StaticResource Btn}"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <Button Name="btnLogFolder" Content="Folder..." Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+                  <Button Name="btnLogFiles" Content="Pliki..." Style="{StaticResource Btn}" Margin="0,0,8,0"/>
+                  <Button Name="btnLogDefault" Content="Domyślna" Style="{StaticResource Btn}"/>
+                </StackPanel>
               </StackPanel>
               <StackPanel Style="{StaticResource FieldBox}" Width="100">
                 <TextBlock Text="MASKA PLIKÓW" Style="{StaticResource Caption}"/>
@@ -516,28 +772,30 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                   <ComboBoxItem Content="Własny zakres"/>
                 </ComboBox>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="150">
+              <StackPanel Style="{StaticResource FieldBox}" Width="140">
                 <TextBlock Text="OD (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtLogFrom" FontFamily="Consolas" IsEnabled="False"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="150">
+              <StackPanel Style="{StaticResource FieldBox}" Width="140">
                 <TextBlock Text="DO (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtLogTo" FontFamily="Consolas" IsEnabled="False"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="110">
+              <StackPanel Style="{StaticResource FieldBox}" Width="100">
                 <TextBlock Text="MAKS. WPISÓW" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtLogMax" Text="20000" FontFamily="Consolas"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-                <Button Name="btnLogLoad" Content="Wczytaj logi" Style="{StaticResource BtnPrimary}" Padding="20,8"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <Button Name="btnLogLoad" Content="Wczytaj logi" Style="{StaticResource BtnPrimary}"/>
+                </StackPanel>
               </StackPanel>
             </WrapPanel>
           </Border>
 
           <!-- FILTRY -->
-          <Border Grid.Row="1" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+          <Border Grid.Row="1" Style="{StaticResource FormCard}">
             <WrapPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="140">
+              <StackPanel Style="{StaticResource FieldBox}" Width="130">
                 <TextBlock Text="WYNIK" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbLResult" SelectedIndex="0">
                   <ComboBoxItem Content="Wszystkie"/>
@@ -546,11 +804,11 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                   <ComboBoxItem Content="Inne"/>
                 </ComboBox>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="210">
+              <StackPanel Style="{StaticResource FieldBox}" Width="190">
                 <TextBlock Text="SWITCH (KLIENT RADIUS)" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbLSwitch"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="230">
+              <StackPanel Style="{StaticResource FieldBox}" Width="210">
                 <TextBlock Text="ZASADA SIECIOWA" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbLPolicy"/>
               </StackPanel>
@@ -558,7 +816,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                 <TextBlock Text="UWIERZYTELNIANIE" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbLAuth"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="190">
+              <StackPanel Style="{StaticResource FieldBox}" Width="170">
                 <TextBlock Text="UŻYTKOWNIK / MAC" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtLUser" FontFamily="Consolas"/>
               </StackPanel>
@@ -566,18 +824,21 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                 <TextBlock Text="SERWER NPS" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtLComputer"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="200">
+              <StackPanel Style="{StaticResource FieldBox}" Width="190">
                 <TextBlock Text="SZUKAJ WSZĘDZIE" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtLSearch"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Margin="4,0,16,10">
+              <StackPanel Style="{StaticResource FieldBox}">
                 <TextBlock Text="POKAŻ TAKŻE" Style="{StaticResource Caption}"/>
-                <CheckBox Name="chkLogReq" Content="Access-Request / Challenge" Margin="0,0,0,4"/>
-                <CheckBox Name="chkLogAcct" Content="Accounting"/>
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <CheckBox Name="chkLogReq" Content="Access-Request / Challenge"/>
+                  <CheckBox Name="chkLogAcct" Content="Accounting" Margin="0"/>
+                </StackPanel>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-                <Button Name="btnLResetFilters" Content="Wyczyść filtry" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-                <Button Name="btnLExport" Content="Eksport CSV" Style="{StaticResource Btn}"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <Button Name="btnLResetFilters" Content="Wyczyść filtry" Style="{StaticResource Btn}"/>
+                </StackPanel>
               </StackPanel>
             </WrapPanel>
           </Border>
@@ -585,56 +846,58 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           <!-- TABELA + SZCZEGÓŁY -->
           <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="14"/>
-              <ColumnDefinition Width="430"/>
+              <ColumnDefinition Width="5*" MinWidth="360"/>
+              <ColumnDefinition Width="12"/>
+              <ColumnDefinition Width="2*" MinWidth="300"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
+            <Border Grid.Column="0" Style="{StaticResource PanelCard}">
               <Grid>
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                  <TextBlock Name="lblLCounts" DockPanel.Dock="Right" Text="" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
-                  <TextBlock Text="Wpisy z logów" Style="{StaticResource CardTitle}"/>
+                <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+                  <Button Name="btnLExport" DockPanel.Dock="Right" Content="Eksport CSV" Style="{StaticResource BtnSmall}" Margin="12,0,0,0"
+                          ToolTip="Zapisz wpisy widoczne w tabeli (po filtrach) do pliku CSV"/>
+                  <TextBlock Text="Wpisy z logów" Style="{StaticResource CardTitle}" DockPanel.Dock="Left" Margin="0,0,12,0"/>
+                  <TextBlock Name="lblLCounts" Text="" Style="{StaticResource Counts}" HorizontalAlignment="Right"/>
                 </DockPanel>
                 <DataGrid Name="dgLog" Grid.Row="1">
                   <DataGrid.Columns>
-                    <DataGridTextColumn Header="Czas" Binding="{Binding TimeStr}" Width="145" FontFamily="Consolas"/>
+                    <DataGridTextColumn Header="Czas" Binding="{Binding TimeStr}" Width="155" FontFamily="Consolas"/>
                     <DataGridTextColumn Header="Wynik" Binding="{Binding Result}" Width="95" ElementStyle="{StaticResource ResultCell}"/>
                     <DataGridTextColumn Header="Użytkownik" Binding="{Binding User}" Width="150"/>
-                    <DataGridTextColumn Header="MAC klienta" Binding="{Binding CallingStation}" Width="140" FontFamily="Consolas"/>
+                    <DataGridTextColumn Header="MAC klienta" Binding="{Binding CallingStation}" Width="145" FontFamily="Consolas"/>
                     <DataGridTextColumn Header="Switch" Binding="{Binding Client}" Width="160"/>
-                    <DataGridTextColumn Header="Port" Binding="{Binding NasPort}" Width="50"/>
+                    <DataGridTextColumn Header="Port" Binding="{Binding NasPort}" Width="55"/>
                     <DataGridTextColumn Header="Zasada sieciowa" Binding="{Binding Policy}" Width="180"/>
                     <DataGridTextColumn Header="Uwierz." Binding="{Binding AuthType}" Width="80"/>
-                    <DataGridTextColumn Header="Kod" Binding="{Binding ReasonCode}" Width="45"/>
-                    <DataGridTextColumn Header="Przyczyna" Binding="{Binding Reason}" Width="*"/>
+                    <DataGridTextColumn Header="Kod" Binding="{Binding ReasonCode}" Width="50"/>
+                    <DataGridTextColumn Header="Przyczyna" Binding="{Binding Reason}" Width="*" MinWidth="160"/>
                     <DataGridTextColumn Header="Serwer NPS" Binding="{Binding Machine}" Width="110"/>
                   </DataGrid.Columns>
                 </DataGrid>
               </Grid>
             </Border>
 
-            <Border Grid.Column="2" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
-              <Grid>
+            <GridSplitter Grid.Column="1" Style="{StaticResource Splitter}"/>
+
+            <Border Grid.Column="2" Style="{StaticResource PanelCard}">
+              <Grid Name="sideLog">
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="*"/>
+                  <RowDefinition Height="*" MinHeight="90"/>
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                  <Button Name="btnLCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource Btn}" Padding="12,4"/>
-                  <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+                <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+                  <Button Name="btnLCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource BtnSmall}"/>
+                  <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}"/>
                 </DockPanel>
-                <TextBox Name="txtLDetails" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"
-                         Text="Wskaż lokalizację logów i kliknij Wczytaj logi."/>
-                <TextBlock Grid.Row="2" Text="Statystyki widoku" Style="{StaticResource CardTitle}" Margin="0,14,0,8"/>
-                <Border Grid.Row="3" Background="{StaticResource Field}" CornerRadius="6" Padding="10" MaxHeight="260">
+                <TextBox Name="txtLDetails" Grid.Row="1" Style="{StaticResource DetailsBox}" Text="Wskaż lokalizację logów i kliknij Wczytaj logi."/>
+                <TextBlock Grid.Row="2" Text="Statystyki widoku" Style="{StaticResource CardTitle}" Margin="0,12,0,8"/>
+                <Border Name="bdLStats" Grid.Row="3" Background="{StaticResource Field}" CornerRadius="6" Padding="8,6" MaxHeight="240">
                   <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <TextBlock Name="txtLStats" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Text="-"/>
                   </ScrollViewer>
@@ -654,20 +917,22 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           </Grid.RowDefinitions>
 
           <!-- ZAPYTANIE -->
-          <Border Grid.Row="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+          <Border Grid.Row="0" Style="{StaticResource FormCard}">
             <WrapPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="200">
+              <StackPanel Style="{StaticResource FieldBox}" Width="190">
                 <TextBlock Text="SERWER NPS (puste = lokalny)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtSServer"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="260">
+              <StackPanel Style="{StaticResource FieldBox}" Width="250">
                 <TextBlock Text="ŹRÓDŁA ZDARZEŃ (rozdziel ;)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtSProviders" Text="NPS; IAS; Microsoft-Windows-NPS" FontFamily="Consolas"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Margin="4,0,16,10">
+              <StackPanel Style="{StaticResource FieldBox}">
                 <TextBlock Text="DZIENNIKI" Style="{StaticResource Caption}"/>
-                <CheckBox Name="chkSSystem" Content="System" IsChecked="True" Margin="0,0,0,4"/>
-                <CheckBox Name="chkSApp" Content="Application"/>
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <CheckBox Name="chkSSystem" Content="System" IsChecked="True"/>
+                  <CheckBox Name="chkSApp" Content="Application" Margin="0"/>
+                </StackPanel>
               </StackPanel>
               <StackPanel Style="{StaticResource FieldBox}" Width="170">
                 <TextBlock Text="ZAKRES CZASU" Style="{StaticResource Caption}"/>
@@ -680,26 +945,28 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                   <ComboBoxItem Content="Własny zakres"/>
                 </ComboBox>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="150">
+              <StackPanel Style="{StaticResource FieldBox}" Width="140">
                 <TextBlock Text="OD (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtSFrom" FontFamily="Consolas" IsEnabled="False"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="150">
+              <StackPanel Style="{StaticResource FieldBox}" Width="140">
                 <TextBlock Text="DO (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtSTo" FontFamily="Consolas" IsEnabled="False"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="110">
+              <StackPanel Style="{StaticResource FieldBox}" Width="100">
                 <TextBlock Text="MAKS. ZDARZEŃ" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtSMax" Text="5000" FontFamily="Consolas"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-                <Button Name="btnSLoad" Content="Wczytaj zdarzenia" Style="{StaticResource BtnPrimary}" Padding="20,8"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <Button Name="btnSLoad" Content="Wczytaj zdarzenia" Style="{StaticResource BtnPrimary}"/>
+                </StackPanel>
               </StackPanel>
             </WrapPanel>
           </Border>
 
           <!-- FILTRY -->
-          <Border Grid.Row="1" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+          <Border Grid.Row="1" Style="{StaticResource FormCard}">
             <WrapPanel>
               <StackPanel Style="{StaticResource FieldBox}" Width="170">
                 <TextBlock Text="POZIOM" Style="{StaticResource Caption}"/>
@@ -718,17 +985,18 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
                 <TextBlock Text="ŹRÓDŁO" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbSSource"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="230">
+              <StackPanel Style="{StaticResource FieldBox}" Width="210">
                 <TextBlock Text="KLIENT RADIUS (IP)" Style="{StaticResource Caption}"/>
                 <ComboBox Name="cbSClient"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" Width="260">
+              <StackPanel Style="{StaticResource FieldBox}" Width="250">
                 <TextBlock Text="SZUKAJ W TREŚCI" Style="{StaticResource Caption}"/>
                 <TextBox Name="txtSSearch"/>
               </StackPanel>
-              <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-                <Button Name="btnSResetFilters" Content="Wyczyść filtry" Style="{StaticResource Btn}" Margin="0,0,8,0"/>
-                <Button Name="btnSExport" Content="Eksport CSV" Style="{StaticResource Btn}"/>
+              <StackPanel Style="{StaticResource FieldBox}">
+                <StackPanel Style="{StaticResource InlineRow}">
+                  <Button Name="btnSResetFilters" Content="Wyczyść filtry" Style="{StaticResource Btn}"/>
+                </StackPanel>
               </StackPanel>
             </WrapPanel>
           </Border>
@@ -736,53 +1004,55 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
           <!-- TABELA + SZCZEGÓŁY -->
           <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="14"/>
-              <ColumnDefinition Width="430"/>
+              <ColumnDefinition Width="5*" MinWidth="360"/>
+              <ColumnDefinition Width="12"/>
+              <ColumnDefinition Width="2*" MinWidth="300"/>
             </Grid.ColumnDefinitions>
 
-            <Border Grid.Column="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
+            <Border Grid.Column="0" Style="{StaticResource PanelCard}">
               <Grid>
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="*"/>
                 </Grid.RowDefinitions>
-                <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                  <TextBlock Name="lblSCounts" DockPanel.Dock="Right" Text="" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
-                  <TextBlock Text="Zdarzenia systemowe" Style="{StaticResource CardTitle}"/>
+                <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+                  <Button Name="btnSExport" DockPanel.Dock="Right" Content="Eksport CSV" Style="{StaticResource BtnSmall}" Margin="12,0,0,0"
+                          ToolTip="Zapisz zdarzenia widoczne w tabeli (po filtrach) do pliku CSV"/>
+                  <TextBlock Text="Zdarzenia systemowe" Style="{StaticResource CardTitle}" DockPanel.Dock="Left" Margin="0,0,12,0"/>
+                  <TextBlock Name="lblSCounts" Text="" Style="{StaticResource Counts}" HorizontalAlignment="Right"/>
                 </DockPanel>
                 <DataGrid Name="dgSys" Grid.Row="1">
                   <DataGrid.Columns>
-                    <DataGridTextColumn Header="Czas" Binding="{Binding TimeStr}" Width="145" FontFamily="Consolas"/>
+                    <DataGridTextColumn Header="Czas" Binding="{Binding TimeStr}" Width="155" FontFamily="Consolas"/>
                     <DataGridTextColumn Header="Poziom" Binding="{Binding Result}" Width="95" ElementStyle="{StaticResource ResultCell}"/>
                     <DataGridTextColumn Header="ID" Binding="{Binding Id}" Width="55"/>
-                    <DataGridTextColumn Header="Źródło" Binding="{Binding Source}" Width="80"/>
-                    <DataGridTextColumn Header="Dziennik" Binding="{Binding LogName}" Width="80"/>
-                    <DataGridTextColumn Header="Klient RADIUS" Binding="{Binding ClientIp}" Width="120" FontFamily="Consolas"/>
+                    <DataGridTextColumn Header="Źródło" Binding="{Binding Source}" Width="85"/>
+                    <DataGridTextColumn Header="Dziennik" Binding="{Binding LogName}" Width="85"/>
+                    <DataGridTextColumn Header="Klient RADIUS" Binding="{Binding ClientIp}" Width="125" FontFamily="Consolas"/>
                     <DataGridTextColumn Header="Switch" Binding="{Binding ClientName}" Width="130"/>
-                    <DataGridTextColumn Header="Wiadomość" Binding="{Binding Short}" Width="*"/>
+                    <DataGridTextColumn Header="Wiadomość" Binding="{Binding Short}" Width="*" MinWidth="200"/>
                   </DataGrid.Columns>
                 </DataGrid>
               </Grid>
             </Border>
 
-            <Border Grid.Column="2" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
-              <Grid>
+            <GridSplitter Grid.Column="1" Style="{StaticResource Splitter}"/>
+
+            <Border Grid.Column="2" Style="{StaticResource PanelCard}">
+              <Grid Name="sideSys">
                 <Grid.RowDefinitions>
                   <RowDefinition Height="Auto"/>
-                  <RowDefinition Height="*"/>
+                  <RowDefinition Height="*" MinHeight="90"/>
                   <RowDefinition Height="Auto"/>
                   <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
-                <DockPanel Grid.Row="0" Margin="0,0,0,10">
-                  <Button Name="btnSCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource Btn}" Padding="12,4"/>
-                  <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+                <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+                  <Button Name="btnSCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource BtnSmall}"/>
+                  <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}"/>
                 </DockPanel>
-                <TextBox Name="txtSDetails" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
-                         VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"
-                         Text="Kliknij Wczytaj zdarzenia."/>
-                <TextBlock Grid.Row="2" Text="Statystyki widoku" Style="{StaticResource CardTitle}" Margin="0,14,0,8"/>
-                <Border Grid.Row="3" Background="{StaticResource Field}" CornerRadius="6" Padding="10" MaxHeight="260">
+                <TextBox Name="txtSDetails" Grid.Row="1" Style="{StaticResource DetailsBox}" Text="Kliknij Wczytaj zdarzenia."/>
+                <TextBlock Grid.Row="2" Text="Statystyki widoku" Style="{StaticResource CardTitle}" Margin="0,12,0,8"/>
+                <Border Name="bdSStats" Grid.Row="3" Background="{StaticResource Field}" CornerRadius="6" Padding="8,6" MaxHeight="240">
                   <ScrollViewer VerticalScrollBarVisibility="Auto">
                     <TextBlock Name="txtSStats" FontFamily="Consolas" FontSize="12" TextWrapping="Wrap" Text="-"/>
                   </ScrollViewer>
@@ -795,12 +1065,12 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
     </TabControl>
 
     <!-- PASEK STATUSU -->
-    <Grid Grid.Row="2" Margin="0,12,0,0">
+    <Grid Grid.Row="2" Margin="0,12,0,0" MinHeight="20">
       <Grid.ColumnDefinitions>
         <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="260"/>
+        <ColumnDefinition Width="240"/>
       </Grid.ColumnDefinitions>
-      <TextBlock Name="lblStatus" Text="Gotowy" Foreground="{StaticResource Muted}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+      <TextBlock Name="lblStatus" Text="Gotowy" Foreground="{StaticResource Muted}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="0,0,12,0"/>
       <ProgressBar Name="pb" Grid.Column="1" IsIndeterminate="False" VerticalAlignment="Center" Visibility="Hidden"/>
     </Grid>
   </Grid>
@@ -812,6 +1082,30 @@ $reader = New-Object System.Xml.XmlNodeReader $xaml
 $win    = [Windows.Markup.XamlReader]::Load($reader)
 $ui     = @{}
 $xaml.SelectNodes('//*[@Name]') | ForEach-Object { $ui[$_.Name] = $win.FindName($_.Name) }
+
+# Okno nie może być większe niż ekran (np. laptop 1366x768 albo skalowanie 150%) - inaczej
+# panel szczegółów i pasek statusu lądują poza ekranem.
+function Set-WindowFit($Window) {
+    $wa = [System.Windows.SystemParameters]::WorkArea
+    if ($Window.Width -gt $wa.Width - 20) { $Window.Width = [Math]::Max(600, $wa.Width - 20) }
+    if ($Window.Height -gt $wa.Height - 20) { $Window.Height = [Math]::Max(400, $wa.Height - 20) }
+    if ($Window.MinWidth -gt $Window.Width) { $Window.MinWidth = $Window.Width }
+    if ($Window.MinHeight -gt $Window.Height) { $Window.MinHeight = $Window.Height }
+}
+Set-WindowFit $win
+
+# Statystyki widoku zajmują najwyżej ~40% wysokości panelu, a w niskim panelu są chowane -
+# miejsce zostaje dla szczegółów zaznaczonego zdarzenia. W niskim oknie znika też podtytuł.
+foreach ($side in 'sideEv', 'sideLog', 'sideSys') {
+    $ui[$side].Add_SizeChanged({
+            $vis = $(if ($this.ActualHeight -lt 300) { 'Collapsed' } else { 'Visible' })
+            foreach ($c in $this.Children) {
+                if ([System.Windows.Controls.Grid]::GetRow($c) -ge 2) { $c.Visibility = $vis }
+                if ($c -is [System.Windows.Controls.Border]) { $c.MaxHeight = [Math]::Max(60, [Math]::Min(240, [Math]::Floor($this.ActualHeight * 0.4))) }
+            }
+        })
+}
+$win.Add_SizeChanged({ $ui.lblSubtitle.Visibility = $(if ($this.ActualHeight -lt 760) { 'Collapsed' } else { 'Visible' }) })
 
 # --- Stan ----------------------------------------------------------------------------------
 $script:Colors   = @{ OK = '#4ADE80'; Warn = '#FBBF24'; Error = '#F87171'; Info = '#8A90A2' }
@@ -2074,10 +2368,10 @@ function New-SysMenu {
 $script:HistXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Historia" Height="860" Width="1320" MinHeight="600" MinWidth="980"
+        Title="Historia" Height="860" Width="1320" MinHeight="560" MinWidth="900"
         WindowStartupLocation="CenterOwner" Background="#15161C"
         FontFamily="Segoe UI" FontSize="13">
-  <Grid Margin="18">
+  <Grid Margin="16">
     <Grid.Resources>
       <Style x:Key="TimelineItem" TargetType="ListBoxItem">
         <Setter Property="Padding" Value="0"/>
@@ -2110,22 +2404,22 @@ $script:HistXaml = @'
     </Grid.RowDefinitions>
 
     <!-- NAGŁÓWEK -->
-    <DockPanel Grid.Row="0" Margin="0,0,0,10">
-      <Border DockPanel.Dock="Right" Background="{StaticResource Card}" CornerRadius="14" Padding="12,6" VerticalAlignment="Center">
-        <StackPanel Orientation="Horizontal">
-          <Ellipse Name="hDot" Width="9" Height="9" Fill="#8A90A2" VerticalAlignment="Center" Margin="0,0,8,0"/>
-          <TextBlock Name="hState" Text="Brak danych" Foreground="{StaticResource Muted}"/>
+    <DockPanel Grid.Row="0" Margin="0,0,0,12">
+      <Border DockPanel.Dock="Right" Background="{StaticResource Card}" CornerRadius="14" Padding="12,0" Height="28" VerticalAlignment="Center">
+        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+          <Ellipse Name="hDot" Width="8" Height="8" Fill="#8A90A2" VerticalAlignment="Center" Margin="0,0,8,0"/>
+          <TextBlock Name="hState" Text="Brak danych" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
         </StackPanel>
       </Border>
-      <StackPanel Margin="0,0,16,0">
-        <TextBlock Name="hTitle" Text="Historia urządzenia / użytkownika" FontSize="22" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
-        <TextBlock Name="hSubtitle" Foreground="{StaticResource Muted}" Margin="0,2,0,0" TextTrimming="CharacterEllipsis"
+      <StackPanel Margin="0,0,16,0" VerticalAlignment="Center">
+        <TextBlock Name="hTitle" Text="Historia urządzenia / użytkownika" Style="{StaticResource PageTitle}"/>
+        <TextBlock Name="hSubtitle" Style="{StaticResource PageSubtitle}"
                    Text="Wszystkie zdarzenia jednego MAC, użytkownika albo komputera w kolejności czasu - ze zmianami sieci, przerwami i odmowami"/>
       </StackPanel>
     </DockPanel>
 
     <!-- ZAPYTANIE -->
-    <Border Grid.Row="1" Background="{StaticResource Card}" CornerRadius="10" Padding="16,14,16,4" Margin="0,0,0,12">
+    <Border Grid.Row="1" Style="{StaticResource FormCard}">
       <WrapPanel>
         <StackPanel Style="{StaticResource FieldBox}" Width="150">
           <TextBlock Text="SZUKAJ WG" Style="{StaticResource Caption}"/>
@@ -2135,11 +2429,11 @@ $script:HistXaml = @'
             <ComboBoxItem Content="Komputer"/>
           </ComboBox>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" Width="240">
+        <StackPanel Style="{StaticResource FieldBox}" Width="220">
           <TextBlock Text="WARTOŚĆ (MAC w dowolnym formacie)" Style="{StaticResource Caption}"/>
           <TextBox Name="hValue" FontFamily="Consolas"/>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" Width="230">
+        <StackPanel Style="{StaticResource FieldBox}" Width="210">
           <TextBlock Text="ZAKRES CZASU" Style="{StaticResource Caption}"/>
           <ComboBox Name="hRange" SelectedIndex="0">
             <ComboBoxItem Content="Dane wczytane w zakładkach"/>
@@ -2151,34 +2445,40 @@ $script:HistXaml = @'
             <ComboBoxItem Content="Własny zakres"/>
           </ComboBox>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" Width="150">
+        <StackPanel Style="{StaticResource FieldBox}" Width="140">
           <TextBlock Text="OD (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
           <TextBox Name="hFrom" FontFamily="Consolas" IsEnabled="False"/>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" Width="150">
+        <StackPanel Style="{StaticResource FieldBox}" Width="140">
           <TextBlock Text="DO (rrrr-mm-dd gg:mm)" Style="{StaticResource Caption}"/>
           <TextBox Name="hTo" FontFamily="Consolas" IsEnabled="False"/>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" Width="110">
+        <StackPanel Style="{StaticResource FieldBox}" Width="100">
           <TextBlock Text="MAKS. ZDARZEŃ" Style="{StaticResource Caption}"/>
           <TextBox Name="hMax" Text="20000" FontFamily="Consolas"/>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Margin="4,0,16,10">
+        <StackPanel Style="{StaticResource FieldBox}">
           <TextBlock Text="ŹRÓDŁA (przy wczytywaniu)" Style="{StaticResource Caption}"/>
-          <CheckBox Name="hSrcEv" Content="Dziennik Security" IsChecked="True" Margin="0,0,0,4"/>
-          <CheckBox Name="hSrcLog" Content="Pliki logów .log"/>
+          <StackPanel Style="{StaticResource InlineRow}">
+            <CheckBox Name="hSrcEv" Content="Dziennik Security" IsChecked="True"/>
+            <CheckBox Name="hSrcLog" Content="Pliki .log" Margin="0"/>
+          </StackPanel>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Margin="0,0,16,17">
-          <CheckBox Name="hPartial" Content="Dopasowanie częściowe" ToolTip="Fragment MAC / nazwy zamiast dokładnej wartości (wolniejsze - bez filtra po stronie serwera)"/>
+        <StackPanel Style="{StaticResource FieldBox}">
+          <StackPanel Style="{StaticResource InlineRow}">
+            <CheckBox Name="hPartial" Content="Dopasowanie częściowe" Margin="0" ToolTip="Fragment MAC / nazwy zamiast dokładnej wartości (wolniejsze - bez filtra po stronie serwera)"/>
+          </StackPanel>
         </StackPanel>
-        <StackPanel Style="{StaticResource FieldBox}" VerticalAlignment="Bottom" Orientation="Horizontal">
-          <Button Name="hLoad" Content="Pokaż historię" Style="{StaticResource BtnPrimary}" Padding="20,8"/>
+        <StackPanel Style="{StaticResource FieldBox}">
+          <StackPanel Style="{StaticResource InlineRow}">
+            <Button Name="hLoad" Content="Pokaż historię" Style="{StaticResource BtnPrimary}"/>
+          </StackPanel>
         </StackPanel>
       </WrapPanel>
     </Border>
 
     <!-- PODSUMOWANIE + PASEK AKTYWNOŚCI + POWIĄZANE -->
-    <Border Grid.Row="2" Background="{StaticResource Card}" CornerRadius="10" Padding="16,12,16,8" Margin="0,0,0,12">
+    <Border Grid.Row="2" Style="{StaticResource CardBox}" Padding="14,12,14,6">
       <StackPanel>
         <WrapPanel Name="hChips"/>
         <DockPanel Margin="0,2,0,0">
@@ -2197,40 +2497,40 @@ $script:HistXaml = @'
       </StackPanel>
     </Border>
 
-    <!-- OŚ CZASU + SZCZEGÓŁY -->
+    <!-- OŚ CZASU + SZCZEGÓŁY (szerokość panelu szczegółów: przeciągnij separator) -->
     <Grid Grid.Row="3">
       <Grid.ColumnDefinitions>
-        <ColumnDefinition Width="*"/>
-        <ColumnDefinition Width="14"/>
-        <ColumnDefinition Width="400"/>
+        <ColumnDefinition Width="2*" MinWidth="420"/>
+        <ColumnDefinition Width="12"/>
+        <ColumnDefinition Width="*" MinWidth="280"/>
       </Grid.ColumnDefinitions>
 
-      <Border Grid.Column="0" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
+      <Border Grid.Column="0" Style="{StaticResource PanelCard}">
         <Grid>
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
-          <DockPanel Grid.Row="0" Margin="0,0,0,8">
-            <TextBlock Name="hCounts" DockPanel.Dock="Right" Foreground="{StaticResource Muted}" VerticalAlignment="Center"/>
-            <TextBlock Text="Oś czasu" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+          <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+            <TextBlock Text="Oś czasu" Style="{StaticResource CardTitle}" DockPanel.Dock="Left" Margin="0,0,12,0"/>
+            <TextBlock Name="hCounts" Style="{StaticResource Counts}" HorizontalAlignment="Right"/>
           </DockPanel>
-          <WrapPanel Grid.Row="1" Margin="0,0,0,8">
-            <ComboBox Name="hResult" Width="130" SelectedIndex="0" Margin="0,0,14,6">
+          <WrapPanel Grid.Row="1" Margin="0,0,0,4">
+            <ComboBox Name="hResult" Width="130" SelectedIndex="0" Margin="0,0,16,8" VerticalAlignment="Center">
               <ComboBoxItem Content="Wszystkie"/>
               <ComboBoxItem Content="Udzielono"/>
               <ComboBoxItem Content="Odmowa"/>
               <ComboBoxItem Content="Inne"/>
             </ComboBox>
-            <CheckBox Name="hGroup" Content="Grupuj powtórzenia" IsChecked="True" Margin="0,0,14,6" VerticalAlignment="Center"/>
-            <CheckBox Name="hMarkers" Content="Zmiany sieci i przerwy" IsChecked="True" Margin="0,0,14,6" VerticalAlignment="Center"/>
-            <CheckBox Name="hAcct" Content="Accounting (sesje, IP)" IsChecked="True" Margin="0,0,14,6" VerticalAlignment="Center" ToolTip="Start / stop sesji z plików .log (adres IP, czas sesji)"/>
-            <CheckBox Name="hReq" Content="Access-Request / Challenge" Margin="0,0,14,6" VerticalAlignment="Center" ToolTip="Pośrednie pakiety z plików .log - zwykle tylko szum"/>
-            <CheckBox Name="hNewest" Content="Najnowsze na górze" Margin="0,0,14,6" VerticalAlignment="Center"/>
-            <StackPanel Orientation="Horizontal" Margin="0,0,0,6" VerticalAlignment="Center">
+            <CheckBox Name="hGroup" Content="Grupuj powtórzenia" IsChecked="True" Margin="0,0,16,8"/>
+            <CheckBox Name="hMarkers" Content="Zmiany sieci i przerwy" IsChecked="True" Margin="0,0,16,8"/>
+            <CheckBox Name="hAcct" Content="Accounting (sesje, IP)" IsChecked="True" Margin="0,0,16,8" ToolTip="Start / stop sesji z plików .log (adres IP, czas sesji)"/>
+            <CheckBox Name="hReq" Content="Access-Request / Challenge" Margin="0,0,16,8" ToolTip="Pośrednie pakiety z plików .log - zwykle tylko szum"/>
+            <CheckBox Name="hNewest" Content="Najnowsze na górze" Margin="0,0,16,8"/>
+            <StackPanel Orientation="Horizontal" Height="28" Margin="0,0,0,8" VerticalAlignment="Center">
               <TextBlock Name="hZoomText" Foreground="{StaticResource Muted}" VerticalAlignment="Center" Text="Widok: cały wczytany zakres"/>
-              <Button Name="hZoomClear" Content="Cały zakres" Style="{StaticResource Btn}" Padding="10,3" Margin="10,0,0,0" Visibility="Collapsed"/>
+              <Button Name="hZoomClear" Content="Cały zakres" Style="{StaticResource BtnSmall}" Margin="8,0,0,0" Visibility="Collapsed"/>
             </StackPanel>
           </WrapPanel>
           <ListBox Name="hList" Grid.Row="2" Background="{StaticResource Field}" BorderThickness="0"
@@ -2241,10 +2541,10 @@ $script:HistXaml = @'
               <DataTemplate>
                 <Grid>
                   <!-- nagłówek dnia -->
-                  <Border Visibility="{Binding DayVis}" Padding="14,12,12,6" BorderBrush="#343847" BorderThickness="0,0,0,1">
+                  <Border Visibility="{Binding DayVis}" Padding="12,12,12,6" BorderBrush="#343847" BorderThickness="0,0,0,1">
                     <DockPanel>
-                      <TextBlock Text="{Binding Detail}" DockPanel.Dock="Right" Foreground="#8A90A2" FontSize="12" VerticalAlignment="Bottom"/>
-                      <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="14" Foreground="#E8EAF0"/>
+                      <TextBlock Text="{Binding Detail}" DockPanel.Dock="Right" Foreground="#8A90A2" FontSize="12" VerticalAlignment="Bottom" Margin="12,0,0,0"/>
+                      <TextBlock Text="{Binding Title}" FontWeight="SemiBold" FontSize="14" Foreground="#E8EAF0" TextTrimming="CharacterEllipsis"/>
                     </DockPanel>
                   </Border>
                   <!-- zmiana sieci / przerwa -->
@@ -2255,7 +2555,7 @@ $script:HistXaml = @'
                       <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
                     <Rectangle Grid.Column="1" Width="2" Fill="#343847" HorizontalAlignment="Center"/>
-                    <Border Grid.Column="2" Background="{Binding MediumBg}" CornerRadius="6" Padding="10,4" Margin="2,3,12,3" HorizontalAlignment="Left">
+                    <Border Grid.Column="2" Background="{Binding MediumBg}" CornerRadius="6" Padding="8,4" Margin="4,4,12,4" HorizontalAlignment="Left">
                       <TextBlock Text="{Binding Title}" Foreground="{Binding TitleColor}" FontStyle="Italic" TextWrapping="Wrap"/>
                     </Border>
                   </Grid>
@@ -2266,14 +2566,14 @@ $script:HistXaml = @'
                       <ColumnDefinition Width="26"/>
                       <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
-                    <StackPanel Margin="8,7,4,7" HorizontalAlignment="Right">
+                    <StackPanel Margin="8,6,4,6" HorizontalAlignment="Right">
                       <TextBlock Text="{Binding TimeStr}" FontFamily="Consolas" FontSize="12" Foreground="#C9CDD8" HorizontalAlignment="Right"/>
-                      <TextBlock Text="{Binding SubTime}" FontSize="11" Foreground="#8A90A2" HorizontalAlignment="Right"/>
+                      <TextBlock Text="{Binding SubTime}" FontSize="11" Foreground="#8A90A2" HorizontalAlignment="Right" TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                     <Rectangle Grid.Column="1" Width="2" Fill="#343847" HorizontalAlignment="Center"/>
                     <Ellipse Grid.Column="1" Width="12" Height="12" Fill="{Binding Color}" Stroke="#272A36" StrokeThickness="2"
                              HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,9,0,0"/>
-                    <StackPanel Grid.Column="2" Margin="2,6,12,7">
+                    <StackPanel Grid.Column="2" Margin="4,6,12,6">
                       <WrapPanel>
                         <TextBlock Text="{Binding Title}" FontWeight="SemiBold" Foreground="{Binding TitleColor}" Margin="0,0,8,0"/>
                         <Border Visibility="{Binding MediumVis}" Background="{Binding MediumBg}" CornerRadius="9" Padding="8,1" Margin="0,0,8,0" VerticalAlignment="Center">
@@ -2291,18 +2591,19 @@ $script:HistXaml = @'
         </Grid>
       </Border>
 
-      <Border Grid.Column="2" Background="{StaticResource Card}" CornerRadius="10" Padding="16">
+      <GridSplitter Grid.Column="1" Style="{StaticResource Splitter}"/>
+
+      <Border Grid.Column="2" Style="{StaticResource PanelCard}">
         <Grid>
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
           </Grid.RowDefinitions>
-          <DockPanel Grid.Row="0" Margin="0,0,0,10">
-            <Button Name="hCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource Btn}" Padding="12,4"/>
-            <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}" VerticalAlignment="Center"/>
+          <DockPanel Grid.Row="0" Style="{StaticResource CardHeader}">
+            <Button Name="hCopy" DockPanel.Dock="Right" Content="Kopiuj" Style="{StaticResource BtnSmall}"/>
+            <TextBlock Text="Szczegóły" Style="{StaticResource CardTitle}"/>
           </DockPanel>
-          <TextBox Name="hDetails" Grid.Row="1" IsReadOnly="True" TextWrapping="Wrap" AcceptsReturn="True"
-                   VerticalScrollBarVisibility="Auto" FontFamily="Consolas" FontSize="12"
+          <TextBox Name="hDetails" Grid.Row="1" Style="{StaticResource DetailsBox}"
                    Text="Wpisz MAC, użytkownika albo komputer i kliknij Pokaż historię."/>
         </Grid>
       </Border>
@@ -3235,12 +3536,7 @@ function Show-HistoryWindow {
     $script:HistWins[$id] = $H
     $u = $H.Ui
 
-    # Okno nie może być większe niż ekran (np. laptop 1366x768)
-    $wa = [System.Windows.SystemParameters]::WorkArea
-    if ($hw.Width -gt $wa.Width - 20) { $hw.Width = [Math]::Max(600, $wa.Width - 20) }
-    if ($hw.Height -gt $wa.Height - 20) { $hw.Height = [Math]::Max(400, $wa.Height - 20) }
-    if ($hw.MinWidth -gt $hw.Width) { $hw.MinWidth = $hw.Width }
-    if ($hw.MinHeight -gt $hw.Height) { $hw.MinHeight = $hw.Height }
+    Set-WindowFit $hw
     try { $hw.Owner = $win } catch { }
 
     $u.hMode.SelectedIndex = [Math]::Max(0, @('Mac', 'User', 'Computer').IndexOf($Mode))
@@ -3575,11 +3871,13 @@ function New-HistoryChip([string]$Text, [string]$Fg = '#E8EAF0', [string]$Bg = '
     $b = New-Object System.Windows.Controls.Border
     $b.Background = Get-Brush $Bg
     $b.CornerRadius = New-Object System.Windows.CornerRadius 10
-    $b.Padding = New-Object System.Windows.Thickness 10, 3, 10, 3
+    $b.Padding = New-Object System.Windows.Thickness 10, 0, 10, 0
+    $b.Height = 24
     $b.Margin = New-Object System.Windows.Thickness 0, 0, 8, 8
     $t = New-Object System.Windows.Controls.TextBlock
     $t.Text = $Text
     $t.FontSize = 12
+    $t.VerticalAlignment = 'Center'
     $t.Foreground = Get-Brush $Fg
     $b.Child = $t
     if ($Tip) { $b.ToolTip = $Tip }
@@ -3627,7 +3925,7 @@ function Update-HistorySummary($H) {
         $cap.Text = $Caption
         $cap.Width = 150
         $cap.Style = $H.Win.FindResource('Caption')
-        $cap.Margin = New-Object System.Windows.Thickness 0, 5, 0, 0
+        $cap.Margin = New-Object System.Windows.Thickness 0, 5, 8, 0
         [void]$wp.Children.Add($cap)
         $keys = @($Map.Keys | Sort-Object { -$Map[$_] })
         foreach ($k in ($keys | Select-Object -First 8)) {
@@ -3635,10 +3933,8 @@ function Update-HistorySummary($H) {
             if ($PivotMode -and $k -ne $Skip) {
                 $btn = New-Object System.Windows.Controls.Button
                 $btn.Content = "$label  ($($Map[$k]))"
-                $btn.Style = $H.Win.FindResource('Btn')
-                $btn.Padding = New-Object System.Windows.Thickness 9, 2, 9, 2
-                $btn.Margin = New-Object System.Windows.Thickness 0, 0, 6, 6
-                $btn.FontSize = 12
+                $btn.Style = $H.Win.FindResource('BtnSmall')
+                $btn.Margin = New-Object System.Windows.Thickness 0, 0, 8, 8
                 $btn.ToolTip = "Pokaż historię: $label"
                 $btn.Tag = @{ Id = $H.Id; Mode = $PivotMode; Value = $label }
                 $btn.Add_Click({ Open-HistoryPivot $this.Tag })

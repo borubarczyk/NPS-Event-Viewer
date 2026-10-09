@@ -58,6 +58,15 @@ function Find-Clipping($Window, [string]$Name) {
     return $out
 }
 
+# Element w całości mieści się w oknie (nie jest ucięty prawą / dolną krawędzią) i ma co najmniej MinH wysokości.
+function Test-InWindow($Window, $Element, [double]$MinH = 0) {
+    $Window.UpdateLayout()
+    $root = [System.Windows.Media.VisualTreeHelper]::GetChild($Window, 0)
+    if (-not $Element.IsVisible -or $Element.ActualHeight -lt $MinH) { return $false }
+    $br = $Element.TransformToAncestor($root).Transform((New-Object System.Windows.Point($Element.ActualWidth, $Element.ActualHeight)))
+    return ($br.X -le $root.ActualWidth + 0.5 -and $br.Y -le $root.ActualHeight + 0.5)
+}
+
 $fail = 0
 function Check($name, $cond) { if ($cond) { "ok   $name" } else { "FAIL $name"; $script:fail++ } }
 
@@ -80,6 +89,25 @@ foreach ($e in $lgs) { $script:Ctx.Log.All.Add($e) }
 foreach ($n in 'Ev', 'Log') { Update-FilterCombos $script:Ctx[$n]; Invoke-Filter $script:Ctx[$n] }
 $win.Show(); Invoke-Pump 500
 Save-Png $win '01-okno-glowne'
+"MAIN WINDOW: $([int]$win.Width) x $([int]$win.Height), work area $([System.Windows.SystemParameters]::WorkArea.Size)"
+$wa = [System.Windows.SystemParameters]::WorkArea
+Check 'main window fits work area' ($win.Width -le $wa.Width -and $win.Height -le $wa.Height)
+# Mały ekran: panel szczegółów i pasek statusu muszą być widoczne także przy minimalnym rozmiarze okna
+# (statystyki widoku chowają się w niskim panelu, żeby zostało miejsce na szczegóły)
+$script:Ctx.Ev.Grid.SelectedIndex = 4; Invoke-Pump 200
+$win.Width = 1560; $win.Height = 900; Invoke-Pump 300
+Check 'stats visible at 1560x900' (Test-InWindow $win $ui.bdStats 40)
+Check 'details visible at 1560x900' (Test-InWindow $win $ui.txtDetails 200)
+foreach ($size in @(@(1280, 720, 200), @([int]$win.MinWidth, [int]$win.MinHeight, 60))) {
+    $win.Width = $size[0]; $win.Height = $size[1]; Invoke-Pump 300
+    $tag = "$($size[0])x$($size[1])"
+    Check "details visible at $tag" (Test-InWindow $win $ui.txtDetails $size[2])
+    Check "status bar visible at $tag" (Test-InWindow $win $ui.lblStatus)
+    Check "export button visible at $tag" (Test-InWindow $win $ui.btnExport)
+    Check "uniform field height at $tag" ($ui.txtServer.ActualHeight -eq 28 -and $ui.cbRange.ActualHeight -eq 28 -and $ui.btnLoad.ActualHeight -eq 28 -and $ui.txtUser.ActualHeight -eq 28)
+    Save-Png $win "01-okno-glowne-$tag"
+}
+$win.Width = 1560; $win.Height = 900; Set-WindowFit $win; Invoke-Pump 200
 Check 'main grid rows' ($script:Ctx.Ev.Grid.Items.Count -eq $evs.Count)
 Check 'details text' ((Get-DetailsText 'Ev' $evs[4]) -like '*Złe poświadczenia*')
 
@@ -94,6 +122,7 @@ Check 'history related pivots' ($H.Ui.hRelated.Children.Count -ge 2)
 Check 'history strip drawn' ($H.Ui.hStrip.Children.Count -gt 0)
 foreach ($c in (Find-Clipping $H.Win 'historia')) { $c; $script:fail++ }
 Save-Png $H.Win '02-historia-mac'
+Check 'history details visible' (Test-InWindow $H.Win $H.Ui.hDetails 80)
 $H.Ui.hList.SelectedIndex = 1; Invoke-Pump 200
 Check 'history details group' ($H.Ui.hDetails.Text -like 'GRUPA: 3*')
 $H.Ui.hNewest.IsChecked = $true; Invoke-Pump 300
